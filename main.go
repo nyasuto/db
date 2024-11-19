@@ -8,11 +8,17 @@ import (
 
 func main() {
 
-	db.Set("hello", "nuhunuhu workd")
+	// db.Set("hello", "nuhunuhu workd")
 	//db.Write("super", "dude")
 	// ret, err := db.Read("super")
 	//ret, err := db.Read("hello")
-	ret, err := db.Get("piyo")
+	err := db.Init()
+	if err != nil {
+		fmt.Println("Error in Init:", err)
+		return
+	}
+	
+	ret, err := db.Get("key1")
 
 	if err != nil {
 		fmt.Println("Error reading file:", err)
