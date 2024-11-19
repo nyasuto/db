@@ -109,7 +109,6 @@ func GetFromFile(key string) (string, error) {
 			return "", err
 		}
 
-		// fmt.Println("Data read from file (reverse order):", string(readKey))
 		if key == string(readKey) {
 			val, _, err := readChunk(offset, file)
 			return val, err

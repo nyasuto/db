@@ -31,6 +31,6 @@ jobs:
       uses: reviewdog/action-golangci-lint@v2
       with:
         github_token: ${{ secrets.GITHUB_TOKEN }}
-        level: error # Change this to 'warning' or 'info' if needed
-        reporter: github-pr-check # Change this to 'github-pr-review' for PR review comments
+        level: error
+        reporter: github-pr-check
         filter_mode: nofilter
