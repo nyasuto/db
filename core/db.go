@@ -1,6 +1,7 @@
 package db
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -12,80 +13,47 @@ var dbFile = "db.db"
 
 const int32Size = 4
 
-func skipChunk(offset int64, file *os.File) (int64, error) {
+func skipChunk(offset int64, reader io.ReaderAt) (int64, error) {
 	var length int32
 	offset -= int64(int32Size)
 
-	_, err := file.Seek(offset, io.SeekStart)
+	// Read the length of the chunk
+	buf := make([]byte, int32Size)
+	_, err := reader.ReadAt(buf, offset)
 	if err != nil {
-		fmt.Println("Error seeking in file:", err)
+		fmt.Println("Error reading length:", err)
 		return 0, err
 	}
-
-	err = binary.Read(file, binary.LittleEndian, &length)
-	if err != nil {
-		fmt.Println("Error reading from file:", err)
-		return 0, err
-	}
+	length = int32(binary.LittleEndian.Uint32(buf))
 	offset -= int64(length)
 
 	return offset, nil
+
 }
 
-func skipChunkFromMemory(offset int32, contents []byte) (int32, error) {
-	var length int32
-	offset -= int32Size
-
-	length = int32(binary.LittleEndian.Uint32(contents[offset : offset+int32Size]))
-	offset -= length
-
-	return offset, nil
-}
-func readChunkFromMemory(offset int32, contents []byte) (string, int32, error) {
-
-	var length int32
-	offset -= int32Size
-
-	length = int32(binary.LittleEndian.Uint32(contents[offset : offset+int32Size]))
-	offset -= length
-
-	val := contents[offset : offset+length]
-	return string(val), offset, nil
-}
-
-func readChunk(offset int64, file *os.File) (string, int64, error) {
-
+func readChunk(offset int64, reader io.ReaderAt) (string, int64, error) {
 	var length int32
 	offset -= int64(int32Size)
 
-	_, err := file.Seek(offset, io.SeekStart)
+	// Read the length of the chunk
+	buf := make([]byte, int32Size)
+	_, err := reader.ReadAt(buf, offset)
 	if err != nil {
-		fmt.Println("Error seeking in file:", err)
+		fmt.Println("Error reading length:", err)
 		return "", 0, err
 	}
-
-	err = binary.Read(file, binary.LittleEndian, &length)
-	if err != nil {
-		fmt.Println("Error reading from file:", err)
-		return "", 0, err
-	}
+	length = int32(binary.LittleEndian.Uint32(buf))
 	offset -= int64(length)
 
-	_, err = file.Seek(offset, io.SeekStart)
+	// Read the chunk data
+	buf = make([]byte, length)
+	_, err = reader.ReadAt(buf, offset)
 	if err != nil {
-		fmt.Println("Error seeking in file:", err)
+		fmt.Println("Error reading chunk data:", err)
 		return "", 0, err
 	}
 
-	val := make([]byte, length)
-
-	err = binary.Read(file, binary.LittleEndian, &val)
-	if err != nil {
-		fmt.Println("Error reading from file:", err)
-		return "", 0, err
-	}
-
-	return string(val), offset, nil
+	return string(buf), offset, nil
 }
 
 func Get(key string) (string, error) {
@@ -159,16 +127,17 @@ func Init() error {
 		return err
 	}
 
-	offset := int32(len(fileContents))
+	offset := int64(len(fileContents))
+	reader := bytes.NewReader(fileContents)
 
 	for offset > 0 {
 		// read key
-		key, valOffset, err := readChunkFromMemory(offset, fileContents)
+		key, valOffset, err := readChunk(offset, reader)
 		if err != nil {
 			fmt.Println("Error reading chunk in file:", err)
 			return err
 		}
-		nextKeyOffset, err := skipChunkFromMemory(valOffset, fileContents)
+		nextKeyOffset, err := skipChunk(valOffset, reader)
 		if err != nil {
 			fmt.Println("Error reading chunk in file:", err)
 			return err
