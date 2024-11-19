@@ -26,16 +26,21 @@ func setupTestDB() {
 }
 
 func teardownTestDB() {
+	// NOP
 }
 func TestGet(t *testing.T) {
-	// 9.8 sec without memory index 
+	// 9.8 sec without memory index
 	// 2.4 sec with memory index
 	dbFile = testDBFile
 
 	setupTestDB()
-	// defer teardownTestDB()
+	defer teardownTestDB()
 
-	Init()
+	err := Init()
+	if err != nil {
+		t.Errorf("Error(%s)", err)
+	}
+
 	// Override the dbFile variable to use the test DB file
 	// Test cases
 	tests := []struct {
@@ -52,7 +57,6 @@ func TestGet(t *testing.T) {
 		{"key110", "value110"},
 		{"key120", "value120"},
 		{"key1000", "value1000"},
-
 	}
 
 	for _, tt := range tests {
