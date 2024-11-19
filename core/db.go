@@ -102,14 +102,13 @@ func GetFromFile(key string) (string, error) {
 	offset := fileSize
 
 	for offset > 0 {
-		var readKey = ""
+		var readKey string
 		readKey, offset, err = readChunk(offset, file)
 		if err != nil {
 			fmt.Println("Error reading chunk in file:", err)
 			return "", err
 		}
 
-		// fmt.Println("Data read from file (reverse order):", string(readKey))
 		if key == string(readKey) {
 			val, _, err := readChunk(offset, file)
 			return val, err
