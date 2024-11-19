@@ -3,7 +3,7 @@ package main
 import (
 	"fmt"
 
-	"github.com/nyasuto/db/db"
+	db "github.com/nyasuto/db/core"
 )
 
 func main() {
@@ -17,7 +17,7 @@ func main() {
 		fmt.Println("Error in Init:", err)
 		return
 	}
-	
+
 	ret, err := db.Get("key1")
 
 	if err != nil {
