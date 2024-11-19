@@ -26,3 +26,11 @@ jobs:
 
     - name: Test
       run: go test -v ./...
+
+    - name: Run golangci-lint with reviewdog
+      uses: reviewdog/action-golangci-lint@v2
+      with:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        level: error # Change this to 'warning' or 'info' if needed
+        reporter: nyasuto # Change this to 'github-pr-review' for PR review comments
+        filter_mode: nofilter
