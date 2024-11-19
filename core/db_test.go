@@ -16,6 +16,7 @@ func setupTestDB() {
 	Set("key3", "value3")
 	Set("key2", "hoge")
 	Set("key1", "{\"name\":\"huga\"}")
+	Set("key2", "hoge")
 
 	for i := 10; i < 1000000; i++ {
 		key := fmt.Sprintf("key%d", i)
@@ -29,14 +30,18 @@ func teardownTestDB() {
 	// NOP
 }
 func TestGet(t *testing.T) {
-	// 9.8 sec without memory index
+	// 22.8 sec with DB insertion 1M keys
+	// 50000 keys / sec
 	// 2.4 sec with memory index
+	// 0.48 sec with initialize from memory
+
 	dbFile = testDBFile
 
 	setupTestDB()
 	defer teardownTestDB()
 
 	err := Init()
+
 	if err != nil {
 		t.Errorf("Error(%s)", err)
 	}

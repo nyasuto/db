@@ -8,8 +8,6 @@ import (
 
 func main() {
 
-	// db.Set("hello", "nuhunuhu workd")
-	//db.Write("super", "dude")
 	// ret, err := db.Read("super")
 	//ret, err := db.Read("hello")
 	err := db.Init()
