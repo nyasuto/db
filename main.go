@@ -8,8 +8,6 @@ import (
 
 func main() {
 
-	// ret, err := db.Read("super")
-	//ret, err := db.Read("hello")
 	err := db.Init()
 	if err != nil {
 		fmt.Println("Error in Init:", err)
