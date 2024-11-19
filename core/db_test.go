@@ -37,8 +37,8 @@ func TestGet(t *testing.T) {
 
 	dbFile = testDBFile
 
-	setupTestDB()
-	defer teardownTestDB()
+	// setupTestDB()
+	// defer teardownTestDB()
 
 	err := Init()
 
