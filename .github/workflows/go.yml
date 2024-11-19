@@ -32,5 +32,5 @@ jobs:
       with:
         github_token: ${{ secrets.GITHUB_TOKEN }}
         level: error # Change this to 'warning' or 'info' if needed
-        reporter: nyasuto # Change this to 'github-pr-review' for PR review comments
+        reporter: github-pr-check # Change this to 'github-pr-review' for PR review comments
         filter_mode: nofilter
