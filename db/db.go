@@ -2,14 +2,13 @@ package db
 
 import (
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"io"
 	"log"
 	"os"
 )
 
-var dbFile = "db.dat"
+var dbFile = "db.db"
 
 const int32Size = 4
 
@@ -76,6 +75,23 @@ func Get(key string) (string, error) {
 	}
 	defer file.Close()
 
+	if _, exists := memoryIndex[key]; !exists {
+		return "", fmt.Errorf("key {%s} not found", key)
+	}
+	offset := memoryIndex[key]
+	value, _, err := readChunk(offset, file)
+
+	return value, err
+}
+
+func GetFromFile(key string) (string, error) {
+	file, err := os.Open(dbFile)
+	if err != nil {
+		log.Fatal("Error opening file:", err)
+		return "", err
+	}
+	defer file.Close()
+
 	stat, err := file.Stat()
 	if err != nil {
 		fmt.Println("Error getting file stats:", err)
@@ -106,7 +122,7 @@ func Get(key string) (string, error) {
 
 	}
 
-	return "", errors.New("not found")
+	return "", fmt.Errorf("key {%s} not found", key)
 }
 
 func Set(key string, value string) {
@@ -144,4 +160,40 @@ func Set(key string, value string) {
 		return
 	}
 
+}
+
+var memoryIndex = make(map[string]int64)
+
+func Init() error {
+
+	file, err := os.Open(dbFile)
+	if err != nil {
+		log.Fatal("Error opening file:", err)
+		return err
+	}
+	defer file.Close()
+	stat, _ := file.Stat()
+
+	offset := stat.Size()
+
+	for offset > 0 {
+		// read key
+		key, valOffset, err := readChunk(offset, file)
+		if err != nil {
+			fmt.Println("Error reading chunk in file:", err)
+			return err
+		}
+		nextKeyOffset, err := skipChunk(valOffset, file)
+		if err != nil {
+			fmt.Println("Error reading chunk in file:", err)
+			return err
+		}
+
+		if _, exists := memoryIndex[key]; !exists {
+			memoryIndex[key] = valOffset
+		}
+		offset = nextKeyOffset
+	}
+	// fmt.Print(memoryIndex)
+	return nil
 }
