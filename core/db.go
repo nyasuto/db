@@ -32,6 +32,27 @@ func skipChunk(offset int64, file *os.File) (int64, error) {
 	return offset, nil
 }
 
+func skipChunkFromMemory(offset int32, contents []byte) (int32, error) {
+	var length int32
+	offset -= int32Size
+
+	length = int32(binary.LittleEndian.Uint32(contents[offset : offset+int32Size]))
+	offset -= length
+
+	return offset, nil
+}
+func readChunkFromMemory(offset int32, contents []byte) (string, int32, error) {
+
+	var length int32
+	offset -= int32Size
+
+	length = int32(binary.LittleEndian.Uint32(contents[offset : offset+int32Size]))
+	offset -= length
+
+	val := contents[offset : offset+length]
+	return string(val), offset, nil
+}
+
 func readChunk(offset int64, file *os.File) (string, int64, error) {
 
 	var length int32
@@ -56,15 +77,15 @@ func readChunk(offset int64, file *os.File) (string, int64, error) {
 		return "", 0, err
 	}
 
-	key := make([]byte, length)
+	val := make([]byte, length)
 
-	err = binary.Read(file, binary.LittleEndian, &key)
+	err = binary.Read(file, binary.LittleEndian, &val)
 	if err != nil {
 		fmt.Println("Error reading from file:", err)
 		return "", 0, err
 	}
 
-	return string(key), offset, nil
+	return string(val), offset, nil
 }
 
 func Get(key string) (string, error) {
@@ -82,46 +103,6 @@ func Get(key string) (string, error) {
 	value, _, err := readChunk(offset, file)
 
 	return value, err
-}
-
-func GetFromFile(key string) (string, error) {
-	file, err := os.Open(dbFile)
-	if err != nil {
-		log.Fatal("Error opening file:", err)
-		return "", err
-	}
-	defer file.Close()
-
-	stat, err := file.Stat()
-	if err != nil {
-		fmt.Println("Error getting file stats:", err)
-		return "", err
-	}
-	fileSize := stat.Size()
-
-	offset := fileSize
-
-	for offset > 0 {
-		var readKey string
-		readKey, offset, err = readChunk(offset, file)
-		if err != nil {
-			fmt.Println("Error reading chunk in file:", err)
-			return "", err
-		}
-
-		if key == string(readKey) {
-			val, _, err := readChunk(offset, file)
-			return val, err
-		}
-
-		offset, err = skipChunk(offset, file)
-		if err != nil {
-			return "", err
-		}
-
-	}
-
-	return "", fmt.Errorf("key {%s} not found", key)
 }
 
 func Set(key string, value string) {
@@ -171,25 +152,30 @@ func Init() error {
 		return err
 	}
 	defer file.Close()
-	stat, _ := file.Stat()
 
-	offset := stat.Size()
+	fileContents, err := io.ReadAll(file)
+	if err != nil {
+		log.Fatal("Error reading file:", err)
+		return err
+	}
+
+	offset := int32(len(fileContents))
 
 	for offset > 0 {
 		// read key
-		key, valOffset, err := readChunk(offset, file)
+		key, valOffset, err := readChunkFromMemory(offset, fileContents)
 		if err != nil {
 			fmt.Println("Error reading chunk in file:", err)
 			return err
 		}
-		nextKeyOffset, err := skipChunk(valOffset, file)
+		nextKeyOffset, err := skipChunkFromMemory(valOffset, fileContents)
 		if err != nil {
 			fmt.Println("Error reading chunk in file:", err)
 			return err
 		}
 
 		if _, exists := memoryIndex[key]; !exists {
-			memoryIndex[key] = valOffset
+			memoryIndex[key] = int64(valOffset)
 		}
 		offset = nextKeyOffset
 	}
