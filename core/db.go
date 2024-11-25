@@ -12,6 +12,16 @@ import (
 var dbFile = "db.db"
 
 const int32Size = 4
+const numOfSegments = 10
+const sizeOfSegment = 50 // 50MB
+var currentSegment = 0
+var memoryIndex [numOfSegments]map[string]int64
+
+func init() {
+	for i := 0; i < numOfSegments; i++ {
+		memoryIndex[i] = make(map[string]int64)
+	}
+}
 
 func skipChunk(offset int64, reader io.ReaderAt) (int64, error) {
 	var length int32
@@ -56,6 +66,18 @@ func readChunk(offset int64, reader io.ReaderAt) (string, int64, error) {
 	return string(buf), offset, nil
 }
 
+func getFromMemoryInfex(key string) (string, error) {
+	for i := currentSegment; i > 0; i-- {
+		if _, exists := memoryIndex[i][key]; exists {
+			// file pointer of i 
+			return readChunk(memoryIndex[i][key])
+		}
+
+	}
+	return "", fmt.Errorf("key {%s} not found", key)
+
+}
+
 func Get(key string) (string, error) {
 	file, err := os.Open(dbFile)
 	if err != nil {
@@ -64,13 +86,7 @@ func Get(key string) (string, error) {
 	}
 	defer file.Close()
 
-	if _, exists := memoryIndex[key]; !exists {
-		return "", fmt.Errorf("key {%s} not found", key)
-	}
-	offset := memoryIndex[key]
-	value, _, err := readChunk(offset, file)
-
-	return value, err
+	return getFromMemoryInfex(key)
 }
 
 func Set(key string, value string) {
@@ -109,8 +125,6 @@ func Set(key string, value string) {
 	}
 
 }
-
-var memoryIndex = make(map[string]int64)
 
 func Init() error {
 
