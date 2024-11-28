@@ -2,11 +2,16 @@ package db
 
 import (
 	"fmt"
+	"os"
 	"testing"
 )
 
 func setupTestDB() {
-	// os.Remove(testDBFile)
+	// 66 sec if open and close file per write
+	for i := 0; i < numOfSegments; i++ {
+		dbFiles[i] = fmt.Sprintf("%s%d%s", dbPrefix, i, dbSuffix)
+		os.Remove(dbFiles[i])
+	}
 
 	Set("key1", "value1")
 	Set("key2", "value2")
@@ -18,6 +23,18 @@ func setupTestDB() {
 	for i := 10; i < 1000000; i++ {
 		key := fmt.Sprintf("key%d", i)
 		val := fmt.Sprintf("value%d", i)
+		Set(key, val)
+	}
+
+	for i := 10; i < 1000000; i++ {
+		key := fmt.Sprintf("key%d", i)
+		val := fmt.Sprintf("value%dxxx", i)
+		Set(key, val)
+	}
+
+	for i := 10; i < 1000000; i++ {
+		key := fmt.Sprintf("key%d", i)
+		val := fmt.Sprintf("value%dzzz", i)
 		Set(key, val)
 	}
 
@@ -51,12 +68,12 @@ func TestGet(t *testing.T) {
 		{"key2", "hoge"},
 		{"key3", "value3"},
 		{"key4", "key not found: key4"},
-		{"key10", "value10"},
-		{"key100", "value100"},
-		{"key110", "value110"},
-		{"key110", "value110"},
-		{"key120", "value120"},
-		{"key1000", "value1000"},
+		{"key10", "value10zzz"},
+		{"key100", "value100zzz"},
+		{"key110", "value110zzz"},
+		{"key110", "value110zzz"},
+		{"key120", "value120zzz"},
+		{"key1000", "value1000zzz"},
 	}
 
 	for _, tt := range tests {

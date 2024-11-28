@@ -48,7 +48,7 @@ func skipChunk(offset int64, reader io.ReaderAt) (int64, error) {
 }
 
 func readChunk(offset int64, reader io.ReaderAt) (string, int64, error) {
-	var length int32
+	var length int64
 	offset -= int64(int32Size)
 
 	// Read the length of the chunk
@@ -58,10 +58,14 @@ func readChunk(offset int64, reader io.ReaderAt) (string, int64, error) {
 		fmt.Println("Error reading length:", err)
 		return "", 0, err
 	}
-	length = int32(binary.LittleEndian.Uint32(buf))
+	length = int64(binary.LittleEndian.Uint32(buf))
 	offset -= int64(length)
 
 	// Read the chunk data
+	if length > 1000{
+		fmt.Println("Error something bad.")
+		return "", 0, err		
+	}
 	buf = make([]byte, length)
 	_, err = reader.ReadAt(buf, offset)
 	if err != nil {
@@ -157,10 +161,12 @@ func Set(key string, value string) {
 		fmt.Println("Error writing to file:", err)
 		return
 	}
+	
 
 }
 
 func Init() error {
+	currentSegment = 0
 
 	for i := 0; i < numOfSegments; i++ {
 		if _, err := os.Stat(dbFiles[i]); os.IsNotExist(err) {
@@ -203,8 +209,13 @@ func Init() error {
 
 			if _, exists := memoryIndex[i][key]; !exists {
 				memoryIndex[i][key] = int64(valOffset)
+				
 			}
 			offset = nextKeyOffset
+
+			if len(memoryIndex[i]) != 0{
+				currentSegment = i
+			}
 		}
 	}
 	// fmt.Print(memoryIndex)
