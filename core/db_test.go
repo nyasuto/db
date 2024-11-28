@@ -2,14 +2,11 @@ package db
 
 import (
 	"fmt"
-	"os"
 	"testing"
 )
 
-const testDBFile = "test_db.db"
-
 func setupTestDB() {
-	os.Remove(testDBFile)
+	// os.Remove(testDBFile)
 
 	Set("key1", "value1")
 	Set("key2", "value2")
@@ -34,8 +31,6 @@ func TestGet(t *testing.T) {
 	// 50000 keys / sec
 	// 2.4 sec with memory index
 	// 0.48 sec with initialize from memory
-
-	dbFile = testDBFile
 
 	setupTestDB()
 	defer teardownTestDB()
