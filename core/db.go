@@ -82,12 +82,14 @@ var normal mode = 0
 var tmp mode = 1
 var currentMode = normal
 
+var logOpenFileError = "Error opening file : "
+
 func Get(key string) (string, error) {
 
 	if currentMode == tmp {
 		file, err := os.Open(tmpDbFile)
 		if err != nil {
-			log.Fatal("Error opening file:", err)
+			log.Fatal(logOpenFileError, err)
 			return "", err
 		}
 		defer file.Close()
@@ -102,7 +104,7 @@ func Get(key string) (string, error) {
 			if _, exists := memoryIndex[i][key]; exists {
 				file, err := os.Open(dbFiles[i])
 				if err != nil {
-					log.Fatal("Error opening file:", err)
+					log.Fatal(logOpenFileError, err)
 					return "", err
 				}
 				defer file.Close()
@@ -138,29 +140,30 @@ func Set(key string, value string) error {
 	for _, value := range []byte(value) {
 		err = binary.Write(file, binary.LittleEndian, value)
 		if err != nil {
-			return fmt.Errorf("error writing to file: %s", err)
+			return writeError(err)
 		}
 	}
 	err = binary.Write(file, binary.LittleEndian, int32(len(value)))
 	if err != nil {
-		return fmt.Errorf("error writing to file: %s", err)
+		return writeError(err)
 	}
 
 	for _, value := range []byte(key) {
 		err = binary.Write(file, binary.LittleEndian, value)
 		if err != nil {
-			return fmt.Errorf("error writing to file: %s", err)
-
+			return writeError(err)
 		}
 	}
 	err = binary.Write(file, binary.LittleEndian, int32(len(key)))
 	if err != nil {
-		return fmt.Errorf("error writing to file: %s", err)
+		return writeError(err)
 	}
 
 	return nil
 }
-
+func writeError(err error) error {
+	return fmt.Errorf("error writing to file: %s", err)
+}
 func Init() error {
 	currentSegment = 0
 
@@ -176,7 +179,7 @@ func Init() error {
 		}
 		file, err := os.Open(dbFiles[i])
 		if err != nil {
-			log.Fatal("Error opening file:", err)
+			log.Fatal(logOpenFileError, err)
 			return err
 		}
 		defer file.Close()
