@@ -43,7 +43,6 @@ func skipChunk(offset int64, reader io.ReaderAt) (int64, error) {
 	offset -= int64(length)
 
 	return offset, nil
-
 }
 
 func readChunk(offset int64, reader io.ReaderAt) (string, int64, error) {
