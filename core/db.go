@@ -62,9 +62,9 @@ func readChunk(offset int64, reader io.ReaderAt) (string, int64, error) {
 	offset -= int64(length)
 
 	// Read the chunk data
-	if length > 1000{
+	if length > 1000 {
 		fmt.Println("Error something bad.")
-		return "", 0, err		
+		return "", 0, err
 	}
 	buf = make([]byte, length)
 	_, err = reader.ReadAt(buf, offset)
@@ -127,41 +127,39 @@ func getDbFile() string {
 	}
 }
 
-func Set(key string, value string) {
+func Set(key string, value string) error {
 
 	file, err := os.OpenFile(getDbFile(), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
-		log.Fatal("Error creating file:", err)
-		return
+		return fmt.Errorf("error creating file: %s", err)
 	}
 	defer file.Close()
 
 	for _, value := range []byte(value) {
 		err = binary.Write(file, binary.LittleEndian, value)
 		if err != nil {
-			fmt.Println("Error writing to file:", err)
-			return
+			return fmt.Errorf("error writing to file: %s", err)
 		}
 	}
 	err = binary.Write(file, binary.LittleEndian, int32(len(value)))
 	if err != nil {
-		fmt.Println("Error writing to file:", err)
-		return
+		return fmt.Errorf("error writing to file: %s", err)
 	}
 
 	for _, value := range []byte(key) {
 		err = binary.Write(file, binary.LittleEndian, value)
 		if err != nil {
-			fmt.Println("Error writing to file:", err)
-			return
+			return fmt.Errorf("error writing to file: %s", err)
+
 		}
 	}
 	err = binary.Write(file, binary.LittleEndian, int32(len(key)))
 	if err != nil {
-		fmt.Println("Error writing to file:", err)
-		return
+		return fmt.Errorf("error writing to file: %s", err)
+
 	}
-	
+
+	return nil
 
 }
 
@@ -209,11 +207,11 @@ func Init() error {
 
 			if _, exists := memoryIndex[i][key]; !exists {
 				memoryIndex[i][key] = int64(valOffset)
-				
+
 			}
 			offset = nextKeyOffset
 
-			if len(memoryIndex[i]) != 0{
+			if len(memoryIndex[i]) != 0 {
 				currentSegment = i
 			}
 		}
