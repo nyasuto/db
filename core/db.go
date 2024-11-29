@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"log"
 	"os"
 )
 
@@ -82,14 +81,11 @@ var normal mode = 0
 var tmp mode = 1
 var currentMode = normal
 
-var logOpenFileError = "Error opening file : "
-
 func Get(key string) (string, error) {
 
 	if currentMode == tmp {
 		file, err := os.Open(tmpDbFile)
 		if err != nil {
-			log.Fatal(logOpenFileError, err)
 			return "", err
 		}
 		defer file.Close()
@@ -104,7 +100,6 @@ func Get(key string) (string, error) {
 			if _, exists := memoryIndex[i][key]; exists {
 				file, err := os.Open(dbFiles[i])
 				if err != nil {
-					log.Fatal(logOpenFileError, err)
 					return "", err
 				}
 				defer file.Close()
@@ -171,7 +166,6 @@ func Init() error {
 		if _, err := os.Stat(dbFiles[i]); os.IsNotExist(err) {
 			file, err := os.Create(dbFiles[i])
 			if err != nil {
-				log.Fatal("Error creating file:", err)
 				return err
 			}
 			file.Close()
@@ -179,14 +173,12 @@ func Init() error {
 		}
 		file, err := os.Open(dbFiles[i])
 		if err != nil {
-			log.Fatal(logOpenFileError, err)
 			return err
 		}
 		defer file.Close()
 
 		fileContents, err := io.ReadAll(file)
 		if err != nil {
-			log.Fatal("Error reading file:", err)
 			return err
 		}
 
@@ -197,12 +189,10 @@ func Init() error {
 			// read key
 			key, valOffset, err := readChunk(offset, reader)
 			if err != nil {
-				fmt.Println("Error reading chunk in file:", err)
 				return err
 			}
 			nextKeyOffset, err := skipChunk(valOffset, reader)
 			if err != nil {
-				fmt.Println("Error reading chunk in file:", err)
 				return err
 			}
 
