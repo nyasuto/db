@@ -156,7 +156,6 @@ func Set(key string, value string) error {
 	err = binary.Write(file, binary.LittleEndian, int32(len(key)))
 	if err != nil {
 		return fmt.Errorf("error writing to file: %s", err)
-
 	}
 
 	return nil
