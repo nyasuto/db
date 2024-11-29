@@ -214,6 +214,5 @@ func Init() error {
 			}
 		}
 	}
-	// fmt.Print(memoryIndex)
 	return nil
 }
