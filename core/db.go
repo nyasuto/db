@@ -86,7 +86,7 @@ func Get(key string) (string, error) {
 	if currentMode == tmp {
 		file, err := os.Open(tmpDbFile)
 		if err != nil {
-			return "", err
+			return "", fmt.Errorf("error opening file: %s", err)
 		}
 		defer file.Close()
 
@@ -100,7 +100,7 @@ func Get(key string) (string, error) {
 			if _, exists := memoryIndex[i][key]; exists {
 				file, err := os.Open(dbFiles[i])
 				if err != nil {
-					return "", err
+					return "", fmt.Errorf("error opening file: %s", err)
 				}
 				defer file.Close()
 
@@ -108,7 +108,6 @@ func Get(key string) (string, error) {
 				value, _, err := readChunk(offset, file)
 				return value, err
 			}
-
 		}
 	}
 
