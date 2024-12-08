@@ -14,7 +14,9 @@ var tmpDbFile = "tmp.db"
 
 const int32Size = 4
 const numOfSegments = 3
+//lint:ignore U1000 will be used in the future
 const sizeOfSegment = 50 // 50MB
+
 var currentSegment = 0
 var memoryIndex [numOfSegments]map[string]int64
 var dbFiles [numOfSegments]string
@@ -161,48 +163,54 @@ func Init() error {
 	currentSegment = 0
 
 	for i := 0; i < numOfSegments; i++ {
-		if _, err := os.Stat(dbFiles[i]); os.IsNotExist(err) {
-			file, err := os.Create(dbFiles[i])
-			if err != nil {
-				return err
-			}
-			file.Close()
-			continue
+		if err := initializeSegment(i); err != nil {
+			return err
 		}
-		file, err := os.Open(dbFiles[i])
+	}
+	return nil
+}
+
+func initializeSegment(segment int) error {
+	if _, err := os.Stat(dbFiles[segment]); os.IsNotExist(err) {
+		file, err := os.Create(dbFiles[segment])
 		if err != nil {
 			return err
 		}
-		defer file.Close()
+		file.Close()
+		return nil
+	}
 
-		fileContents, err := io.ReadAll(file)
+	file, err := os.Open(dbFiles[segment])
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	fileContents, err := io.ReadAll(file)
+	if err != nil {
+		return err
+	}
+
+	offset := int64(len(fileContents))
+	reader := bytes.NewReader(fileContents)
+
+	for offset > 0 {
+		key, valOffset, err := readChunk(offset, reader)
+		if err != nil {
+			return err
+		}
+		nextKeyOffset, err := skipChunk(valOffset, reader)
 		if err != nil {
 			return err
 		}
 
-		offset := int64(len(fileContents))
-		reader := bytes.NewReader(fileContents)
+		if _, exists := memoryIndex[segment][key]; !exists {
+			memoryIndex[segment][key] = int64(valOffset)
+		}
+		offset = nextKeyOffset
 
-		for offset > 0 {
-			// read key
-			key, valOffset, err := readChunk(offset, reader)
-			if err != nil {
-				return err
-			}
-			nextKeyOffset, err := skipChunk(valOffset, reader)
-			if err != nil {
-				return err
-			}
-
-			if _, exists := memoryIndex[i][key]; !exists {
-				memoryIndex[i][key] = int64(valOffset)
-
-			}
-			offset = nextKeyOffset
-
-			if len(memoryIndex[i]) != 0 {
-				currentSegment = i
-			}
+		if len(memoryIndex[segment]) != 0 {
+			currentSegment = segment
 		}
 	}
 	return nil
