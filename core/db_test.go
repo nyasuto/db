@@ -6,38 +6,71 @@ import (
 	"testing"
 )
 
-func setupTestDB() {
+func setWithErrorCheck(key, value string) error {
+	err := Set(key, value)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+func setupTestDB() error {
 	// 66 sec if open and close file per write
 	for i := 0; i < numOfSegments; i++ {
 		dbFiles[i] = fmt.Sprintf("%s%d%s", dbPrefix, i, dbSuffix)
 		os.Remove(dbFiles[i])
 	}
 
-	Set("key1", "value1")
-	Set("key2", "value2")
-	Set("key3", "value3")
-	Set("key2", "hoge")
-	Set("key1", "{\"name\":\"huga\"}")
-	Set("key2", "hoge")
-
+	err := Set("key1", "value1")
+	if err != nil {
+		return err
+	}
+	err = Set("key2", "value2")
+	if err != nil {
+		return err
+	}
+	err = Set("key3", "value3")
+	if err != nil {
+		return err
+	}
+	err = Set("key2", "hoge")
+	if err != nil {
+		return err
+	}
+	err = Set("key1", "{\"name\":\"huga\"}")
+	if err != nil {
+		return err
+	}
+	err = Set("key2", "hoge")
+	if err != nil {
+		return err
+	}
 	for i := 10; i < 1000000; i++ {
 		key := fmt.Sprintf("key%d", i)
 		val := fmt.Sprintf("value%d", i)
-		Set(key, val)
+		err = Set(key, val)
+		if err != nil {
+			return err
+		}
 	}
 
 	for i := 10; i < 1000000; i++ {
 		key := fmt.Sprintf("key%d", i)
 		val := fmt.Sprintf("value%dxxx", i)
-		Set(key, val)
+		err = Set(key, val)
+		if err != nil {
+			return err
+		}
 	}
 
 	for i := 10; i < 1000000; i++ {
 		key := fmt.Sprintf("key%d", i)
 		val := fmt.Sprintf("value%dzzz", i)
-		Set(key, val)
+		err = Set(key, val)
+		if err != nil {
+			return err
+		}
 	}
-
+	return nil
 }
 
 func teardownTestDB() {
@@ -49,13 +82,19 @@ func TestGet(t *testing.T) {
 	// 2.4 sec with memory index
 	// 0.48 sec with initialize from memory
 
-	setupTestDB()
+	err := setupTestDB()
+	if err != nil {
+		t.Error(err)
+		return
+	}
+
 	defer teardownTestDB()
 
-	err := Init()
+	err = Init()
 
 	if err != nil {
-		t.Errorf("Error(%s)", err)
+		t.Error(err)
+		return 
 	}
 
 	// Override the dbFile variable to use the test DB file
@@ -80,7 +119,7 @@ func TestGet(t *testing.T) {
 		t.Run(tt.key, func(t *testing.T) {
 			result, err := Get(tt.key)
 			if err != nil && tt.key != "key4" {
-				t.Errorf("Error(%s)", err)
+				t.Error(err)
 			}
 
 			if result != tt.expected && tt.key != "key4" {

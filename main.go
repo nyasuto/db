@@ -7,13 +7,13 @@ import (
 )
 
 func main() {
-
+	
 	err := db.Init()
 	if err != nil {
 		fmt.Println("Error in Init:", err)
 		return
 	}
-	db.Set("key1", "value1")	
+	db.Set("key1", "value1")
 	ret, err := db.Get("key1")
 
 	if err != nil {
@@ -21,5 +21,5 @@ func main() {
 		return
 	}
 	fmt.Print(ret)
-	
+
 }
