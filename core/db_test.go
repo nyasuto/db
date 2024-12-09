@@ -6,14 +6,8 @@ import (
 	"testing"
 )
 
-func setWithErrorCheck(key, value string) error {
-	err := Set(key, value)
-	if err != nil {
-		return err
-	}
-	return nil
-}
 func setupTestDB() error {
+	
 	// 66 sec if open and close file per write
 	for i := 0; i < numOfSegments; i++ {
 		dbFiles[i] = fmt.Sprintf("%s%d%s", dbPrefix, i, dbSuffix)
