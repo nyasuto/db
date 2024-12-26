@@ -30,50 +30,38 @@ func init() {
 	}
 }
 
-func skipChunk(offset int64, reader io.ReaderAt) (int64, error) {
-	var length int32
-	offset -= int64(int32Size)
-
-	// Read the length of the chunk
-	buf := make([]byte, int32Size)
+func readChunk(offset int64, reader io.ReaderAt) (string, string, int64, error) {
+	// 先にチャンク全体サイズを読み取り、offsetを更新
+	offset -= int64(4)
+	buf := make([]byte, 4)
 	_, err := reader.ReadAt(buf, offset)
 	if err != nil {
-		fmt.Println("Error reading length:", err)
-		return 0, err
+		return "", "", 0, fmt.Errorf("error reading total length: %w", err)
 	}
-	length = int32(binary.LittleEndian.Uint32(buf))
-	offset -= int64(length)
+	totalLen := int64(binary.LittleEndian.Uint32(buf))
+	offset -= totalLen
 
-	return offset, nil
-}
-
-func readChunk(offset int64, reader io.ReaderAt) (string, int64, error) {
-	var length int64
-	offset -= int64(int32Size)
-
-	// Read the length of the chunk
-	buf := make([]byte, int32Size)
-	_, err := reader.ReadAt(buf, offset)
-	if err != nil {
-		fmt.Println("Error reading length:", err)
-		return "", 0, err
-	}
-	length = int64(binary.LittleEndian.Uint32(buf))
-	offset -= int64(length)
-
-	// Read the chunk data
-	if length > 1000 {
-		fmt.Println("Error something bad.")
-		return "", 0, err
-	}
-	buf = make([]byte, length)
+	// チャンク本体を読み込み
+	buf = make([]byte, totalLen)
 	_, err = reader.ReadAt(buf, offset)
 	if err != nil {
-		fmt.Println("Error reading chunk data:", err)
-		return "", 0, err
+		return "", "", 0, fmt.Errorf("error reading chunk data: %w", err)
 	}
 
-	return string(buf), offset, nil
+	// bufからキー長・キー・値長・値を順に取り出す
+	var keyLen, valLen int32
+	pos := 0
+	keyLen = int32(binary.LittleEndian.Uint32(buf[pos : pos+4]))
+	pos += 4
+	keyBytes := buf[pos : pos+int(keyLen)]
+	pos += int(keyLen)
+
+	valLen = int32(binary.LittleEndian.Uint32(buf[pos : pos+4]))
+	pos += 4
+	valBytes := buf[pos : pos+int(valLen)]
+	pos += int(valLen)
+
+	return string(keyBytes), string(valBytes), offset, nil
 }
 
 type mode int
@@ -93,7 +81,7 @@ func Get(key string) (string, error) {
 
 		if _, exists := tmpMemoryIndex[key]; exists {
 			offset := tmpMemoryIndex[key]
-			value, _, err := readChunk(offset, file)
+			_, value, err := readChunk(offset, file)
 			return value, err
 		}
 	} else {
@@ -106,7 +94,7 @@ func Get(key string) (string, error) {
 				defer file.Close()
 
 				offset := memoryIndex[i][key]
-				value, _, err := readChunk(offset, file)
+				_, value, err := readChunk(offset, file)
 				return value, err
 			}
 		}
@@ -131,23 +119,30 @@ func Set(key string, value string) error {
 	}
 	defer file.Close()
 
-	// Write key length
+	// チャンク全体サイズ（キー+値+それぞれのサイズ分）
+	totalLen := int32(len(key) + len(value) + 4 + 4) // keyLen(4byte) + valueLen(4byte)
+
+	// チャンク末尾に書き込む4バイト分を先に書く
+	err = binary.Write(file, binary.LittleEndian, totalLen)
+	if err != nil {
+		return fmt.Errorf("error writing total length: %s", err)
+	}
+
+	// キー長とキーを書き込み
 	err = binary.Write(file, binary.LittleEndian, int32(len(key)))
 	if err != nil {
 		return fmt.Errorf("error writing key length: %s", err)
 	}
-	// Write key
 	_, err = file.Write([]byte(key))
 	if err != nil {
 		return fmt.Errorf("error writing key: %s", err)
 	}
 
-	// Write value length
+	// 値長と値を書き込み
 	err = binary.Write(file, binary.LittleEndian, int32(len(value)))
 	if err != nil {
 		return fmt.Errorf("error writing value length: %s", err)
 	}
-	// Write value
 	_, err = file.Write([]byte(value))
 	if err != nil {
 		return fmt.Errorf("error writing value: %s", err)
@@ -192,20 +187,13 @@ func initializeSegment(segment int) error {
 	reader := bytes.NewReader(fileContents)
 
 	for offset > 0 {
-		key, valOffset, err := readChunk(offset, reader)
+		k, v, nextOffset, err := readChunk(offset, reader)
 		if err != nil {
 			return err
 		}
-		nextKeyOffset, err := skipChunk(valOffset, reader)
-		if err != nil {
-			return err
-		}
+		memoryIndex[segment][k] = (nextOffset + 4) // offset計算例: 4はchunk末尾サイズ
 
-		if _, exists := memoryIndex[segment][key]; !exists {
-			memoryIndex[segment][key] = int64(valOffset)
-		}
-		offset = nextKeyOffset
-
+		offset = nextOffset
 		if len(memoryIndex[segment]) != 0 {
 			currentSegment = segment
 		}
