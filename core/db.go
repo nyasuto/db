@@ -125,40 +125,39 @@ func getDbFile() string {
 }
 
 func Set(key string, value string) error {
-
 	file, err := os.OpenFile(getDbFile(), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return fmt.Errorf("error creating file: %s", err)
 	}
 	defer file.Close()
 
-	for _, value := range []byte(value) {
-		err = binary.Write(file, binary.LittleEndian, value)
-		if err != nil {
-			return writeError(err)
-		}
-	}
-	err = binary.Write(file, binary.LittleEndian, int32(len(value)))
-	if err != nil {
-		return writeError(err)
-	}
-
-	for _, value := range []byte(key) {
-		err = binary.Write(file, binary.LittleEndian, value)
-		if err != nil {
-			return writeError(err)
-		}
-	}
+	// Write the length of the key
 	err = binary.Write(file, binary.LittleEndian, int32(len(key)))
 	if err != nil {
-		return writeError(err)
+		return fmt.Errorf("error writing key length: %s", err)
+	}
+
+	// Write the key
+	_, err = file.Write([]byte(key))
+	if err != nil {
+		return fmt.Errorf("error writing key: %s", err)
+	}
+
+	// Write the length of the value
+	err = binary.Write(file, binary.LittleEndian, int32(len(value)))
+	if err != nil {
+		return fmt.Errorf("error writing value length: %s", err)
+	}
+
+	// Write the value
+	_, err = file.Write([]byte(value))
+	if err != nil {
+		return fmt.Errorf("error writing value: %s", err)
 	}
 
 	return nil
 }
-func writeError(err error) error {
-	return fmt.Errorf("error writing to file: %s", err)
-}
+
 func Init() error {
 	currentSegment = 0
 
