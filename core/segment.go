@@ -1,7 +1,6 @@
 package db
 
 import (
-	"bytes"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -12,9 +11,14 @@ import (
 )
 
 const dir = "./segments"
+const int32Size = 4
 
 // 1000 * 1000 = 1MB
 const maxSize = int64(10 * 1000 * 1000) // Max size for each segment in bytes
+
+func writeError(err error) error {
+	return fmt.Errorf("error writing to file: %s", err)
+}
 
 // Segment represents a single log segment
 type Segment struct {
@@ -226,27 +230,25 @@ func (m *SegmentManager) LoadIndex() error {
 		if err != nil {
 			return fmt.Errorf("Error seeking to start of segment file:%s", err)
 		}
-
-		fileContents, err := io.ReadAll(segment.File)
+		stat, err := segment.File.Stat()
 		if err != nil {
 			return err
 		}
 
-		offset := int64(len(fileContents))
-		reader := bytes.NewReader(fileContents)
+		offset := int64(stat.Size())
 
 		for offset > 0 {
-			key, valOffset, err := readChunk(offset, reader)
+			key, valOffset, err := segment.readChunk(offset)
 			if err != nil {
 				return err
 			}
-			nextKeyOffset, err := skipChunk(valOffset, reader)
+			nextKeyOffset, err := segment.skipChunk(valOffset)
 			if err != nil {
 				return err
 			}
 
 			if _, exists := m.KeyIndex[key]; !exists {
-				m.KeyIndex[key] = index{SegmentId: i+1, Offset: valOffset}
+				m.KeyIndex[key] = index{SegmentId: i + 1, Offset: valOffset}
 			}
 			offset = nextKeyOffset
 

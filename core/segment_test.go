@@ -23,7 +23,7 @@ func TestRead(t *testing.T) {
 	// 100k: 0.766sec, 130k read/sec
 	//   1m: 2.196sec, 454k read/sec
 
-	for i := 1; i <= 100*1000; i++ {
+	for i := 1; i <= 1000*1000; i++ {
 		key := "key" + strconv.Itoa(i)
 		value := "value" + strconv.Itoa(i)
 
