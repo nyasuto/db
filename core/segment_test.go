@@ -1,6 +1,8 @@
 package db
 
 import (
+	"fmt"
+	"os"
 	"strconv"
 	"testing"
 
@@ -8,6 +10,8 @@ import (
 )
 
 func TestRead(t *testing.T) {
+	Write()
+
 	manager, err := NewDefaultSegmentManager()
 
 	assert.Nil(t, err)
@@ -40,18 +44,19 @@ func TestRead(t *testing.T) {
 	}
 }
 
-/*
-func TestWrite(t *testing.T) {
-
+func Write() {
+	if _, err := os.Stat(dir); os.IsExist(err) {
+		return
+	}
 	// Ensure the directory exists
 	if err := os.MkdirAll(dir, 0755); err != nil {
-		t.Error("Error creating directory:", err)
+
 		return
 	}
 
 	manager, err := NewSegmentManager(dir, maxSize)
 	if err != nil {
-		t.Error("Error creating segment manager:", err)
+
 		return
 	}
 
@@ -66,4 +71,3 @@ func TestWrite(t *testing.T) {
 	}
 
 }
-*/
