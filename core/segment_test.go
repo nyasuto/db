@@ -45,18 +45,17 @@ func TestRead(t *testing.T) {
 }
 
 func Write() {
-	if _, err := os.Stat(dir); os.IsExist(err) {
+	_, err := os.Stat(dir)
+	if err == nil {
 		return
 	}
 	// Ensure the directory exists
 	if err := os.MkdirAll(dir, 0755); err != nil {
-
 		return
 	}
 
 	manager, err := NewSegmentManager(dir, maxSize)
 	if err != nil {
-
 		return
 	}
 
