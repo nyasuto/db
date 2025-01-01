@@ -1,15 +1,20 @@
 package db
 
 import (
-	"bufio"
+	"bytes"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"log"
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 )
+
+const dir = "./segments"
+
+// 1000 * 1000 = 1MB
+const maxSize = int64(10 * 1000 * 1000) // Max size for each segment in bytes
 
 // Segment represents a single log segment
 type Segment struct {
@@ -22,7 +27,7 @@ type Segment struct {
 // NewSegment creates a new segment
 func NewSegment(id int, dir string) (*Segment, error) {
 	filepath := filepath.Join(dir, fmt.Sprintf("segment_%d.log", id))
-	file, err := os.OpenFile(filepath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	file, err := os.OpenFile(filepath, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0644)
 	if err != nil {
 		return nil, err
 	}
@@ -50,55 +55,91 @@ func loadSegment(id int, dir string) (*Segment, error) {
 	}, nil
 }
 
-func (s *Segment) ReadByLine(key string, lineNumber int) (*string, error) {
-	_, err := s.File.Seek(0, 0)
-	if err != nil {
-		return nil, err
-	}
-	buff, err := io.ReadAll(s.File)
-	if err != nil {
-		return nil, err
-	}
-	lines := strings.Split(string(buff), "\n")
-
-	parts := strings.SplitN(lines[lineNumber], "=", 2)
-	if len(parts) == 2 && parts[0] == key {
-		return &parts[1], nil
-	}
-
-	return nil, nil
+func (s *Segment) Read(key string, offset int64) (*string, error) {
+	val, _, err := s.readChunk(int64(offset))
+	return &val, err
 }
-func (s *Segment) Read(key string) (*string, error) {
-	_, err := s.File.Seek(0, 0)
-	if err != nil {
-		return nil, err
-	}
-	buff, err := io.ReadAll(s.File)
-	if err != nil {
-		return nil, err
-	}
-	lines := strings.Split(string(buff), "\n")
 
-	for _, line := range lines {
+func (s *Segment) skipChunk(offset int64) (int64, error) {
+	var length int32
+	offset -= int64(int32Size)
 
-		parts := strings.SplitN(line, "=", 2)
-		if len(parts) == 2 && parts[0] == key {
-			return &parts[1], nil
+	// Read the length of the chunk
+	buf := make([]byte, int32Size)
+	reader := s.File
+	_, err := reader.ReadAt(buf, offset)
+	if err != nil {
+		fmt.Println("Error reading length:", err)
+		return 0, err
+	}
+	length = int32(binary.LittleEndian.Uint32(buf))
+	offset -= int64(length)
+
+	return offset, nil
+}
+
+func (s *Segment) readChunk(offset int64) (string, int64, error) {
+	var length int64
+	offset -= int64(int32Size)
+
+	// Read the length of the chunk
+	buf := make([]byte, int32Size)
+
+	reader := s.File
+	_, err := reader.ReadAt(buf, offset)
+	if err != nil {
+		fmt.Println("Error reading length:", err)
+		return "", 0, err
+	}
+	length = int64(binary.LittleEndian.Uint32(buf))
+	offset -= int64(length)
+
+	// Read the chunk data
+	if length > 1000 {
+		fmt.Println("Error something bad.")
+		return "", 0, err
+	}
+	buf = make([]byte, length)
+	_, err = reader.ReadAt(buf, offset)
+	if err != nil {
+		fmt.Println("Error reading chunk data:", err)
+		return "", 0, err
+	}
+
+	return string(buf), offset, nil
+}
+func (s *Segment) Write(key string, value string) (offset int64, err error) {
+
+	for _, b := range []byte(value) {
+		err = binary.Write(s.File, binary.LittleEndian, b)
+		if err != nil {
+			return 0, writeError(err)
 		}
 	}
 
-	return nil, nil
-}
-
-// Write writes a key-value pair to the segment
-func (s *Segment) Write(key, value string) error {
-	entry := fmt.Sprintf("%s=%s\n", key, value)
-	n, err := s.File.WriteString(entry)
+	err = binary.Write(s.File, binary.LittleEndian, int32(len(value)))
 	if err != nil {
-		return err
+		return 0, writeError(err)
 	}
-	s.Size += int64(n)
-	return nil
+
+	offset, _ = s.File.Seek(0, io.SeekCurrent)
+
+	for _, b := range []byte(key) {
+		err = binary.Write(s.File, binary.LittleEndian, b)
+		if err != nil {
+			return 0, writeError(err)
+		}
+	}
+	err = binary.Write(s.File, binary.LittleEndian, int32(len(key)))
+	if err != nil {
+		return 0, writeError(err)
+	}
+
+	stat, _ := s.File.Stat()
+	s.Size = stat.Size()
+
+	return offset, nil
+
 }
 
 // Close closes the segment file
@@ -119,11 +160,6 @@ type SegmentManager struct {
 	CurrentSegment *Segment
 	SegmentCounter int
 }
-
-const dir = "./segments"
-
-// 1000 * 1000 = 1MB
-const maxSize = int64(1000 * 1000) // Max size for each segment in bytes
 
 func NewDefaultSegmentManager() (*SegmentManager, error) {
 	return NewSegmentManager(dir, maxSize)
@@ -182,7 +218,7 @@ func (m *SegmentManager) InitializeSegments() bool {
 }
 
 func (m *SegmentManager) LoadIndex() error {
-	m.KeyIndex = make(map[string]index)
+
 	for i := m.SegmentCounter - 1; i >= 0; i-- {
 		// Read the segment file
 		segment := m.Segments[i]
@@ -191,19 +227,29 @@ func (m *SegmentManager) LoadIndex() error {
 			return fmt.Errorf("Error seeking to start of segment file:%s", err)
 		}
 
-		scanner := bufio.NewScanner(segment.File)
-		offset := int64(0)
-		for scanner.Scan() {
-			line := scanner.Text()
-			parts := strings.SplitN(line, "=", 2)
-			if len(parts) == 2 {
-				m.KeyIndex[parts[0]] = index{SegmentId: i, Offset: offset}
-			}
-			offset++
+		fileContents, err := io.ReadAll(segment.File)
+		if err != nil {
+			return err
 		}
 
-		if err := scanner.Err(); err != nil {
-			return fmt.Errorf("Error scanning segment file:%s", err)
+		offset := int64(len(fileContents))
+		reader := bytes.NewReader(fileContents)
+
+		for offset > 0 {
+			key, valOffset, err := readChunk(offset, reader)
+			if err != nil {
+				return err
+			}
+			nextKeyOffset, err := skipChunk(valOffset, reader)
+			if err != nil {
+				return err
+			}
+
+			if _, exists := m.KeyIndex[key]; !exists {
+				m.KeyIndex[key] = index{SegmentId: i+1, Offset: valOffset}
+			}
+			offset = nextKeyOffset
+
 		}
 	}
 	return nil
@@ -216,6 +262,7 @@ func NewSegmentManager(directory string, maxSize int64) (*SegmentManager, error)
 		MaxSegmentSize: maxSize,
 		Segments:       []*Segment{},
 		SegmentCounter: 0,
+		KeyIndex:       make(map[string]index),
 	}
 
 	if !manager.InitializeSegments() {
@@ -231,9 +278,9 @@ func NewSegmentManager(directory string, maxSize int64) (*SegmentManager, error)
 
 // createSegment creates a new segment
 func (m *SegmentManager) createSegment() error {
-	if m.CurrentSegment != nil {
-		m.CurrentSegment.Close()
-	}
+	//if m.CurrentSegment != nil {
+	//	m.CurrentSegment.Close()
+	//}
 
 	m.SegmentCounter++
 	segment, err := NewSegment(m.SegmentCounter, m.Directory)
@@ -247,7 +294,7 @@ func (m *SegmentManager) createSegment() error {
 }
 
 // Write writes a key-value pair to the current segment
-func (m *SegmentManager) Write(key, value string) error {
+func (m *SegmentManager) Write(key, value string) (err error) {
 	if m.CurrentSegment.Size >= m.MaxSegmentSize {
 		err := m.createSegment()
 		if err != nil {
@@ -255,14 +302,21 @@ func (m *SegmentManager) Write(key, value string) error {
 		}
 	}
 
-	return m.CurrentSegment.Write(key, value)
+	offset, err := m.CurrentSegment.Write(key, value)
+	if err != nil {
+		return err
+	}
+
+	m.KeyIndex[key] = index{SegmentId: m.CurrentSegment.ID, Offset: offset}
+	return nil
+
 }
 
 // Read a value by key
 func (m *SegmentManager) Read(key string) (value string, err error) {
 	if index, ok := m.KeyIndex[key]; ok {
-		segment := m.Segments[index.SegmentId]
-		val, err := segment.ReadByLine(key, int(index.Offset))
+		segment := m.Segments[index.SegmentId-1]
+		val, err := segment.Read(key, index.Offset)
 		if err != nil {
 			return "", err
 		}
@@ -271,18 +325,5 @@ func (m *SegmentManager) Read(key string) (value string, err error) {
 		}
 	}
 
-	fmt.Printf("Key (%s) not found in cache\n", key)
-
-	for i := m.SegmentCounter - 1; i >= 0; i-- {
-		// Read the segment file
-		val, err := m.Segments[i].Read(key)
-		if err != nil {
-			return "", err
-		}
-		if val != nil {
-			// fmt.Printf("Key (%s) found in segment %s\n", key, m.Segments[i].Filepath)
-			return *val, nil
-		}
-	}
 	return "", fmt.Errorf("Key (%s) Not found", key)
 }
