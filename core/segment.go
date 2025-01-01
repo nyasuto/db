@@ -256,6 +256,11 @@ func (m *SegmentManager) LoadIndex() error {
 	}
 	return nil
 }
+func (m *SegmentManager) CloseAll() {
+	for _, segment := range m.Segments {
+		segment.Close()
+	}
+}
 
 // NewSegmentManager initializes the segment manager
 func NewSegmentManager(directory string, maxSize int64) (*SegmentManager, error) {
