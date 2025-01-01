@@ -31,6 +31,8 @@ func TestRead(t *testing.T) {
 		assert.Nil(t, err)
 		assert.Equal(t, value, val)
 	}
+
+	manager.CloseAll()
 }
 
 func Write() *SegmentManager {
