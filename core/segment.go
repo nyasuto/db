@@ -141,6 +141,9 @@ func (m *SegmentManager) InitializeSegments() bool {
 	if err != nil {
 		return false
 	}
+	if len(files) == 0 {
+		return false
+	}
 	segments := []*Segment{}
 
 	for _, file := range files {
