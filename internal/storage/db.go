@@ -3,160 +3,170 @@ package storage
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"hash/crc32"
+	"io"
 	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
 
 var (
-	ErrKeyNotFound    = errors.New("key not found")
-	ErrDataCorruption = errors.New("data corruption: crc mismatch")
+	ErrKeyNotFound      = errors.New("key not found")
+	ErrDataCorruption   = errors.New("data corruption: crc mismatch")
+	ErrCompactionNotImp = errors.New("compaction not implemented for segmented mode")
+)
+
+const (
+	MaxFileSize        = 10 * 1024 * 1024 // 10MB
+	tombstoneValueSize = ^uint32(0)       // MaxUint32
 )
 
 // RecordPos はファイル内でのレコードの位置情報を保持します。
 type RecordPos struct {
+	FileID int
 	Offset int64
 }
 
 // DB は Bitcask モデルの簡易的な KVS エンジンです。
 type DB struct {
-	mu     sync.RWMutex
-	path   string
-	file   *os.File
-	keyDir map[string]RecordPos
-	offset int64
+	mu           sync.RWMutex
+	dirPath      string
+	activeFile   *os.File
+	activeFileID int
+	olderFiles   map[int]*os.File
+	keyDir       map[string]RecordPos
+	writeOffset  int64
 }
 
-// NewDB は指定されたパスでデータベースを開きます。
-func NewDB(path string) (*DB, error) {
-	// ファイルを開く（追記モード）
-	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0644)
+// NewDB は指定されたディレクトリパスでデータベースを開きます。
+func NewDB(dirPath string) (*DB, error) {
+	if err := os.MkdirAll(dirPath, 0755); err != nil {
+		return nil, err
+	}
+
+	// ディレクトリ内の .data ファイルを取得
+	entries, err := os.ReadDir(dirPath)
 	if err != nil {
 		return nil, err
 	}
 
-	stat, err := file.Stat()
-	if err != nil {
-		_ = file.Close()
-		return nil, err
+	var fileIDs []int
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".data") {
+			name := strings.TrimSuffix(entry.Name(), ".data")
+			id, err := strconv.Atoi(name)
+			if err == nil {
+				fileIDs = append(fileIDs, id)
+			}
+		}
 	}
+	sort.Ints(fileIDs)
 
 	db := &DB{
-		path:   path,
-		file:   file,
-		keyDir: make(map[string]RecordPos),
-		offset: stat.Size(),
+		dirPath:    dirPath,
+		olderFiles: make(map[int]*os.File),
+		keyDir:     make(map[string]RecordPos),
 	}
 
-	// 既存データがある場合はインデックスを復元
-	if stat.Size() > 0 {
-		if err := db.loadKeyDir(); err != nil {
-			_ = file.Close()
+	// 全ファイルをロードしてインデックス構築
+	for _, id := range fileIDs {
+		if err := db.loadFile(id); err != nil {
+			db.Close()
 			return nil, err
 		}
+	}
+
+	// アクティブファイルの設定（ファイルが無い、または最後のファイルが既存の場合）
+	if len(fileIDs) == 0 {
+		// 新規作成
+		if err := db.newActiveFile(0); err != nil {
+			db.Close()
+			return nil, err
+		}
+	} else {
+		// 最後のファイルをアクティブにする
+		// 実際には読み込み専用で開いているものを Reopen するか、そのまま使うか
+		// ここでは簡略化のため、最後のIDをアクティブとして設定
+		lastID := fileIDs[len(fileIDs)-1]
+		// loadFileでolderFilesに入っているので、それをactiveに昇格させる
+		f := db.olderFiles[lastID]
+		delete(db.olderFiles, lastID)
+
+		db.activeFile = f
+		db.activeFileID = lastID
+
+		// オフセットは末尾へ (loadFileでSeekしてないかもしれないので念のため)
+		info, err := f.Stat()
+		if err != nil {
+			db.Close()
+			return nil, err
+		}
+		db.writeOffset = info.Size()
 	}
 
 	return db, nil
 }
 
-// Merge はデータファイルを再構築し、不要な領域を解放します。
-func (d *DB) Merge() error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	// 一時ファイルの作成
-	tempPath := d.path + ".merge"
-	tempFile, err := os.OpenFile(tempPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		_ = tempFile.Close()
-		// エラー時には一時ファイルを削除（成功時はRenameされるので削除されない）
-		if err != nil {
-			_ = os.Remove(tempPath)
-		}
-	}()
-
-	newKeyDir := make(map[string]RecordPos)
-	var newOffset int64
-
-	// 現在の有効なキーのみを新しいファイルに書き写す
-	for key, pos := range d.keyDir {
-		// Header Read (CRC 4bytes + Ts 8 + KeySize 4 + ValSize 4 = 20)
-		header := make([]byte, 20)
-		if _, err := d.file.ReadAt(header, pos.Offset); err != nil {
-			return err
-		}
-		keySize := binary.BigEndian.Uint32(header[12:16])
-		valSize := binary.BigEndian.Uint32(header[16:20])
-
-		totalRecSize := 20 + int64(keySize) + int64(valSize)
-		data := make([]byte, totalRecSize)
-		if _, err := d.file.ReadAt(data, pos.Offset); err != nil {
-			return err
-		}
-
-		// CRC検証はloadKeyDirやGetで行っている前提だが、
-		// Merge時にも壊れたデータを移さないよう検証するのがGuardianの役目
-		storedCRC := binary.BigEndian.Uint32(data[0:4])
-		// データ部分: data[4:]
-		calculatedCRC := crc32.ChecksumIEEE(data[4:])
-		if storedCRC != calculatedCRC {
-			return ErrDataCorruption
-		}
-
-		// 新しいファイルに書き込み
-		if _, err := tempFile.Write(data); err != nil {
-			return err
-		}
-
-		newKeyDir[key] = RecordPos{Offset: newOffset}
-		newOffset += totalRecSize
-	}
-
-	// ファイルの入れ替え処理
-	// 1. ファイルを閉じる
-	if err := d.file.Close(); err != nil {
-		return err
-	}
-	if err := tempFile.Close(); err != nil {
-		return err
-	}
-
-	// 2. リネーム (Atomic Replace)
-	if err := os.Rename(tempPath, d.path); err != nil {
-		return err
-	}
-
-	// 3. 再オープン
-	file, err := os.OpenFile(d.path, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0644)
+func (d *DB) loadFile(id int) error {
+	path := filepath.Join(d.dirPath, fmt.Sprintf("%d.data", id))
+	// 読み書きモードで開く（Activeになる可能性があるため）
+	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0644)
 	if err != nil {
 		return err
 	}
 
-	// 4. メタデータ更新
-	d.file = file
-	d.keyDir = newKeyDir
-	d.offset = newOffset
+	d.olderFiles[id] = file // 一旦olderに入れる
 
+	// インデックス構築
+	if err := d.loadKeyDir(id, file); err != nil {
+		return err
+	}
 	return nil
 }
 
-// loadKeyDir はファイル全体を走査してインデックスを再構築します。
-func (d *DB) loadKeyDir() error {
-	if _, err := d.file.Seek(0, 0); err != nil {
+func (d *DB) newActiveFile(id int) error {
+	// 既存があればOlderへ移動
+	if d.activeFile != nil {
+		d.olderFiles[d.activeFileID] = d.activeFile
+	}
+
+	path := filepath.Join(d.dirPath, fmt.Sprintf("%d.data", id))
+	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0644)
+	if err != nil {
 		return err
 	}
 
+	d.activeFile = file
+	d.activeFileID = id
+	d.writeOffset = 0
+	return nil
+}
+
+// loadKeyDir は単一ファイルを走査してインデックスを更新します。
+func (d *DB) loadKeyDir(fileID int, file *os.File) error {
+	if _, err := file.Seek(0, 0); err != nil {
+		return err
+	}
+
+	info, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	fileSize := info.Size()
 	var offset int64
-	fileSize := d.offset // NewDBで設定済み
 
 	for offset < fileSize {
-		// ヘッダー読み込み (CRC+Ts+Sizes = 20 bytes)
+		// Header (CRC 4 + Ts 8 + KSize 4 + VSize 4 = 20)
 		header := make([]byte, 20)
-		if _, err := d.file.Read(header); err != nil {
+		if _, err := file.Read(header); err != nil {
+			if err == io.EOF {
+				break
+			}
 			return err
 		}
 
@@ -164,67 +174,45 @@ func (d *DB) loadKeyDir() error {
 		keySize := int64(binary.BigEndian.Uint32(header[12:16]))
 		valSizeRaw := binary.BigEndian.Uint32(header[16:20])
 
-		// キーを読み込む
 		key := make([]byte, keySize)
-		if _, err := d.file.Read(key); err != nil {
+		if _, err := file.Read(key); err != nil {
 			return err
 		}
 
-		// CRC検証のためにはValueの情報も必要
-		// しかし、Valueを読むとシーク位置が進むため効率が...
-		// The Guardianとしては信頼性優先で検証すべき。
-
+		// CRC Check Logic
 		var valSize int64
 		var isTombstone bool
-
 		if valSizeRaw == tombstoneValueSize {
 			isTombstone = true
-			valSize = 0 // ファイル上のValue実体は0バイト
+			valSize = 0
 		} else {
 			valSize = int64(valSizeRaw)
 		}
 
-		// CRC計算用バッファの構築 (Header[4:] + Key + Value)
-		// 効率化: 本当はストリームで計算したいが、簡易実装として読み込む
 		checkData := make([]byte, 16+keySize+valSize)
-		copy(checkData[0:16], header[4:]) // Timestamp ~ ValueSize
+		copy(checkData[0:16], header[4:])
 		copy(checkData[16:16+keySize], key)
 
 		if !isTombstone {
-			// Valueを読み込む
-			if _, err := d.file.Read(checkData[16+keySize:]); err != nil {
+			if _, err := file.Read(checkData[16+keySize:]); err != nil {
 				return err
 			}
 		}
 
-		// CRC計算と検証
 		if crc32.ChecksumIEEE(checkData) != storedCRC {
 			return ErrDataCorruption
 		}
 
 		if isTombstone {
 			delete(d.keyDir, string(key))
-			// isTombstoneの場合、ReadでValue位置は進んでいないのでSeek不要
 		} else {
-			d.keyDir[string(key)] = RecordPos{Offset: offset}
-			// ValueはCRC計算のために既にRead済みなのでSeek不要
+			d.keyDir[string(key)] = RecordPos{FileID: fileID, Offset: offset}
 		}
 
-		// 次のレコードへ (Readした分だけ進んでいるはず)
 		offset += 20 + keySize + valSize
 	}
-
 	return nil
 }
-
-// Close はデータベースを閉じます。
-func (d *DB) Close() error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return d.file.Close()
-}
-
-const tombstoneValueSize = ^uint32(0) // MaxUint32
 
 // Put はキーと値を保存します。
 func (d *DB) Put(key, value []byte) error {
@@ -238,31 +226,35 @@ func (d *DB) Put(key, value []byte) error {
 		return errors.New("value too large")
 	}
 
-	ts := time.Now().UnixNano()
-	// CRC(4) + Ts(8) + KSize(4) + VSize(4) + Key + Value
-	totalSize := 4 + 8 + 4 + 4 + int64(keySize) + int64(valSize)
+	// Rotation Check
+	currentSize := d.writeOffset
+	// CRC(4)+Ts(8)+KS(4)+VS(4)+K+V
+	recordSize := 4 + 8 + 4 + 4 + int64(keySize) + int64(valSize)
 
-	// バッファの作成
-	buf := make([]byte, totalSize)
-	// Offset 4からメタデータ書き込み
+	if currentSize+recordSize > MaxFileSize {
+		// activeFileを閉じて新しいファイルを作成
+		if err := d.newActiveFile(d.activeFileID + 1); err != nil {
+			return err
+		}
+	}
+
+	ts := time.Now().UnixNano()
+	buf := make([]byte, recordSize)
 	binary.BigEndian.PutUint64(buf[4:12], uint64(ts))
 	binary.BigEndian.PutUint32(buf[12:16], keySize)
 	binary.BigEndian.PutUint32(buf[16:20], valSize)
 	copy(buf[20:20+keySize], key)
 	copy(buf[20+keySize:], value)
 
-	// CRC計算 (Timestamp以降の全データ)
 	crc := crc32.ChecksumIEEE(buf[4:])
 	binary.BigEndian.PutUint32(buf[0:4], crc)
 
-	// ファイルへの書き込み
-	if _, err := d.file.Write(buf); err != nil {
+	if _, err := d.activeFile.Write(buf); err != nil {
 		return err
 	}
 
-	// インデックスの更新
-	d.keyDir[string(key)] = RecordPos{Offset: d.offset}
-	d.offset += totalSize
+	d.keyDir[string(key)] = RecordPos{FileID: d.activeFileID, Offset: d.writeOffset}
+	d.writeOffset += recordSize
 
 	return nil
 }
@@ -272,30 +264,33 @@ func (d *DB) Delete(key []byte) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	ts := time.Now().UnixNano()
 	keySize := uint32(len(key))
 	valSize := tombstoneValueSize
+	recordSize := 4 + 8 + 4 + 4 + int64(keySize)
 
-	// CRC(4) + Header(16) + Key (TombstoneなのでValueなし)
-	totalSize := 4 + 8 + 4 + 4 + int64(keySize)
+	// Rotation logic included? Yes, simplest is to check active file size for Delete too.
+	if d.writeOffset+recordSize > MaxFileSize {
+		if err := d.newActiveFile(d.activeFileID + 1); err != nil {
+			return err
+		}
+	}
 
-	buf := make([]byte, totalSize)
+	ts := time.Now().UnixNano()
+	buf := make([]byte, recordSize)
 	binary.BigEndian.PutUint64(buf[4:12], uint64(ts))
 	binary.BigEndian.PutUint32(buf[12:16], keySize)
 	binary.BigEndian.PutUint32(buf[16:20], valSize)
 	copy(buf[20:20+keySize], key)
 
-	// CRC計算
 	crc := crc32.ChecksumIEEE(buf[4:])
 	binary.BigEndian.PutUint32(buf[0:4], crc)
 
-	if _, err := d.file.Write(buf); err != nil {
+	if _, err := d.activeFile.Write(buf); err != nil {
 		return err
 	}
 
-	// インデックスから削除
 	delete(d.keyDir, string(key))
-	d.offset += totalSize
+	d.writeOffset += recordSize
 
 	return nil
 }
@@ -310,9 +305,21 @@ func (d *DB) Get(key []byte) ([]byte, error) {
 		return nil, ErrKeyNotFound
 	}
 
-	// ヘッダー読み込み (CRC+Ts+Sizes = 20 bytes)
+	// どのファイルから読むか特定
+	var file *os.File
+	if pos.FileID == d.activeFileID {
+		file = d.activeFile
+	} else {
+		var exists bool
+		file, exists = d.olderFiles[pos.FileID]
+		if !exists {
+			return nil, errors.New("file not found: internal error")
+		}
+	}
+
+	// Read header and data (Same logic as before, just using selected file)
 	header := make([]byte, 20)
-	if _, err := d.file.ReadAt(header, pos.Offset); err != nil {
+	if _, err := file.ReadAt(header, pos.Offset); err != nil {
 		return nil, err
 	}
 
@@ -320,37 +327,48 @@ func (d *DB) Get(key []byte) ([]byte, error) {
 	keySize := binary.BigEndian.Uint32(header[12:16])
 	valSize := binary.BigEndian.Uint32(header[16:20])
 
-	// データ本体を読み込む (Key + Value)
 	dataSize := int64(keySize) + int64(valSize)
-	// データ位置 = Offset + 20
-	// しかしCRC検証のためには Header[4:] + Data が必要
-	// 効率化のため、改めて全体を読むか、部分を読むか。
-	// ここではデータ本体を読み、メモリ上で結合してCRCチェックする
-
 	data := make([]byte, dataSize)
-	if _, err := d.file.ReadAt(data, pos.Offset+20); err != nil {
+	if _, err := file.ReadAt(data, pos.Offset+20); err != nil {
 		return nil, err
 	}
 
-	// CRC計算用のバッファ構築
-	// (メモリ効率はやや悪いが正確性重視)
 	checkBuf := make([]byte, 16+dataSize)
-	copy(checkBuf[0:16], header[4:]) // Timestamp(8) + KSize(4) + VSize(4)
+	copy(checkBuf[0:16], header[4:])
 	copy(checkBuf[16:], data)
 
 	if crc32.ChecksumIEEE(checkBuf) != storedCRC {
 		return nil, ErrDataCorruption
 	}
 
-	// キーの一致確認
-	readKey := data[:keySize]
-	if string(readKey) != string(key) {
-		return nil, errors.New("data corruption: key mismatch")
+	if string(data[:keySize]) != string(key) {
+		return nil, errors.New("key mismatch")
 	}
 
-	readValue := data[keySize:]
-	result := make([]byte, len(readValue))
-	copy(result, readValue)
-
+	result := make([]byte, valSize)
+	copy(result, data[keySize:])
 	return result, nil
+}
+
+// Close はデータベースを閉じます。
+func (d *DB) Close() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if d.activeFile != nil {
+		if err := d.activeFile.Close(); err != nil {
+			return err
+		}
+	}
+	for _, f := range d.olderFiles {
+		if err := f.Close(); err != nil {
+			return err // Return first error
+		}
+	}
+	return nil
+}
+
+// Merge is not implemented yet for segmented mode
+func (d *DB) Merge() error {
+	return ErrCompactionNotImp
 }
