@@ -83,8 +83,7 @@ func (d *DB) loadKeyDir() error {
 
 		// サイズ取得
 		keySize := int64(binary.BigEndian.Uint32(header[8:12]))
-		valSize := int64(binary.BigEndian.Uint32(header[12:16]))
-		totalSize := 16 + keySize + valSize
+		valSizeRaw := binary.BigEndian.Uint32(header[12:16])
 
 		// キーを読み込む
 		key := make([]byte, keySize)
@@ -92,15 +91,21 @@ func (d *DB) loadKeyDir() error {
 			return err
 		}
 
-		// インデックス更新
-		d.keyDir[string(key)] = RecordPos{Offset: offset}
+		if valSizeRaw == tombstoneValueSize {
+			// 削除レコード (Tombstone)
+			delete(d.keyDir, string(key))
+			offset += 16 + keySize
+		} else {
+			// 通常レコード
+			d.keyDir[string(key)] = RecordPos{Offset: offset}
+			valSize := int64(valSizeRaw)
 
-		// 値の部分をスキップ
-		if _, err := d.file.Seek(valSize, 1); err != nil { // 1 = io.SeekCurrent
-			return err
+			// 値の部分をスキップ
+			if _, err := d.file.Seek(valSize, 1); err != nil { // 1 = io.SeekCurrent
+				return err
+			}
+			offset += 16 + keySize + valSize
 		}
-
-		offset += totalSize
 	}
 
 	return nil
@@ -113,14 +118,21 @@ func (d *DB) Close() error {
 	return d.file.Close()
 }
 
+const tombstoneValueSize = ^uint32(0) // MaxUint32
+
 // Put はキーと値を保存します。
 func (d *DB) Put(key, value []byte) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	ts := time.Now().UnixNano()
 	keySize := uint32(len(key))
 	valSize := uint32(len(value))
+
+	if valSize == tombstoneValueSize {
+		return errors.New("value too large")
+	}
+
+	ts := time.Now().UnixNano()
 	totalSize := 8 + 4 + 4 + int64(keySize) + int64(valSize)
 
 	// バッファの作成
@@ -139,6 +151,36 @@ func (d *DB) Put(key, value []byte) error {
 
 	// インデックスの更新
 	d.keyDir[string(key)] = RecordPos{Offset: d.offset}
+	d.offset += totalSize
+
+	return nil
+}
+
+// Delete はキーを削除します。
+func (d *DB) Delete(key []byte) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	ts := time.Now().UnixNano()
+	keySize := uint32(len(key))
+	// ValueSizeにTombstone用の値を設定
+	valSize := tombstoneValueSize
+
+	// ヘッダー(16 bytes) + キー (値はなし)
+	totalSize := 8 + 4 + 4 + int64(keySize)
+
+	buf := make([]byte, totalSize)
+	binary.BigEndian.PutUint64(buf[0:8], uint64(ts))
+	binary.BigEndian.PutUint32(buf[8:12], keySize)
+	binary.BigEndian.PutUint32(buf[12:16], valSize)
+	copy(buf[16:16+keySize], key)
+
+	if _, err := d.file.Write(buf); err != nil {
+		return err
+	}
+
+	// インデックスから削除
+	delete(d.keyDir, string(key))
 	d.offset += totalSize
 
 	return nil
