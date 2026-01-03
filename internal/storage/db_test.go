@@ -8,13 +8,13 @@ import (
 
 func TestPutGet(t *testing.T) {
 	dbPath := "test_db.data"
-	defer os.Remove(dbPath)
+	defer func() { _ = os.Remove(dbPath) }()
 
 	db, err := NewDB(dbPath)
 	if err != nil {
 		t.Fatalf("Failed to open DB: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	key := []byte("my-key")
 	value := []byte("my-value")
@@ -35,7 +35,7 @@ func TestPutGet(t *testing.T) {
 
 func TestRecovery(t *testing.T) {
 	dbPath := "test_recovery.data"
-	defer os.Remove(dbPath)
+	defer func() { _ = os.Remove(dbPath) }()
 
 	// 1. 書き込み
 	db, err := NewDB(dbPath)
@@ -49,14 +49,14 @@ func TestRecovery(t *testing.T) {
 	if err := db.Put(key, value); err != nil {
 		t.Fatalf("Put failed: %v", err)
 	}
-	db.Close() // ここで閉じる
+	_ = db.Close() // ここで閉じる
 
 	// 2. 再起動と読み込み
 	db2, err := NewDB(dbPath)
 	if err != nil {
 		t.Fatalf("Failed to re-open DB: %v", err)
 	}
-	defer db2.Close()
+	defer func() { _ = db2.Close() }()
 
 	got, err := db2.Get(key)
 	if err != nil {
@@ -70,13 +70,13 @@ func TestRecovery(t *testing.T) {
 
 func BenchmarkPut(b *testing.B) {
 	dbPath := "bench_put.data"
-	defer os.Remove(dbPath)
+	defer func() { _ = os.Remove(dbPath) }()
 
 	db, err := NewDB(dbPath)
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -90,13 +90,13 @@ func BenchmarkPut(b *testing.B) {
 
 func BenchmarkPut1KB(b *testing.B) {
 	dbPath := "bench_put_1kb.data"
-	defer os.Remove(dbPath)
+	defer func() { _ = os.Remove(dbPath) }()
 
 	db, err := NewDB(dbPath)
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	// 1KB のダミーデータを作成
 	val := make([]byte, 1024)
@@ -116,13 +116,13 @@ func BenchmarkPut1KB(b *testing.B) {
 
 func BenchmarkGet(b *testing.B) {
 	dbPath := "bench_get.data"
-	defer os.Remove(dbPath)
+	defer func() { _ = os.Remove(dbPath) }()
 
 	db, err := NewDB(dbPath)
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	// データを事前に書き込む
 	const itemCount = 1000
@@ -145,13 +145,13 @@ func BenchmarkGet(b *testing.B) {
 
 func BenchmarkGet1KB(b *testing.B) {
 	dbPath := "bench_get_1kb.data"
-	defer os.Remove(dbPath)
+	defer func() { _ = os.Remove(dbPath) }()
 
 	db, err := NewDB(dbPath)
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	// データを事前に書き込む (10,000件 x 1KB ≒ 10MB)
 	const itemCount = 10000
