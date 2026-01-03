@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bufio"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -152,10 +153,12 @@ func (d *DB) loadHintFile(fileID int, path string) error {
 	fileSize := stat.Size()
 	var offset int64
 
+	reader := bufio.NewReader(file)
+
 	for offset < fileSize {
 		// [CRC(4)][Ts(8)][KSz(4)][VSz(4)][Offset(8)] = 28 bytes
 		header := make([]byte, 28)
-		if _, err := file.Read(header); err != nil {
+		if _, err := io.ReadFull(reader, header); err != nil {
 			if err == io.EOF {
 				break
 			}
@@ -167,7 +170,7 @@ func (d *DB) loadHintFile(fileID int, path string) error {
 		dataOffset := binary.BigEndian.Uint64(header[20:28])
 
 		key := make([]byte, keySize)
-		if _, err := file.Read(key); err != nil {
+		if _, err := io.ReadFull(reader, key); err != nil {
 			return err
 		}
 
@@ -204,6 +207,8 @@ func (d *DB) newActiveFile(id int) error {
 	return nil
 }
 
+// ...
+
 // loadKeyDir は単一ファイルを走査してインデックスを更新します。
 func (d *DB) loadKeyDir(fileID int, file *os.File) error {
 	if _, err := file.Seek(0, 0); err != nil {
@@ -217,10 +222,12 @@ func (d *DB) loadKeyDir(fileID int, file *os.File) error {
 	fileSize := info.Size()
 	var offset int64
 
+	reader := bufio.NewReader(file)
+
 	for offset < fileSize {
 		// Header (CRC 4 + Ts 8 + KSize 4 + VSize 4 = 20)
 		header := make([]byte, 20)
-		if _, err := file.Read(header); err != nil {
+		if _, err := io.ReadFull(reader, header); err != nil {
 			if err == io.EOF {
 				break
 			}
@@ -232,7 +239,7 @@ func (d *DB) loadKeyDir(fileID int, file *os.File) error {
 		valSizeRaw := binary.BigEndian.Uint32(header[16:20])
 
 		key := make([]byte, keySize)
-		if _, err := file.Read(key); err != nil {
+		if _, err := io.ReadFull(reader, key); err != nil {
 			return err
 		}
 
@@ -251,7 +258,8 @@ func (d *DB) loadKeyDir(fileID int, file *os.File) error {
 		copy(checkData[16:16+keySize], key)
 
 		if !isTombstone {
-			if _, err := file.Read(checkData[16+keySize:]); err != nil {
+			// Read Value into checkData
+			if _, err := io.ReadFull(reader, checkData[16+keySize:]); err != nil {
 				return err
 			}
 		}
