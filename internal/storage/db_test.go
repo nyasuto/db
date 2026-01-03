@@ -301,3 +301,61 @@ func BenchmarkGet1KB(b *testing.B) {
 		}
 	}
 }
+
+func BenchmarkPutParallel(b *testing.B) {
+	dbPath := "bench_put_parallel.data"
+	defer func() { _ = os.Remove(dbPath) }()
+
+	db, err := NewDB(dbPath)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		i := 0
+		for pb.Next() {
+			i++
+			// 簡易的なキー生成（並行実行内でのユニーク性は保証しないが、競合負荷を見る目的には十分）
+			// 本来は atomic add などでユニークにするが、Putは上書きでも問題ない
+			key := []byte(fmt.Sprintf("key-%d", i))
+			val := []byte(fmt.Sprintf("val-%d", i))
+			if err := db.Put(key, val); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}
+
+func BenchmarkGetParallel(b *testing.B) {
+	dbPath := "bench_get_parallel.data"
+	defer func() { _ = os.Remove(dbPath) }()
+
+	db, err := NewDB(dbPath)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	const itemCount = 10000
+	val := make([]byte, 128)
+	for i := 0; i < itemCount; i++ {
+		key := []byte(fmt.Sprintf("key-%d", i))
+		if err := db.Put(key, val); err != nil {
+			b.Fatal(err)
+		}
+	}
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		i := 0
+		for pb.Next() {
+			i++
+			key := []byte(fmt.Sprintf("key-%d", i%itemCount))
+			if _, err := db.Get(key); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}
