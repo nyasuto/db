@@ -21,9 +21,12 @@ var (
 	ErrCompactionNotImp = errors.New("compaction not implemented for segmented mode")
 )
 
+var (
+	MaxFileSize = int64(10 * 1024 * 1024) // 10MB (var for testing)
+)
+
 const (
-	MaxFileSize        = 10 * 1024 * 1024 // 10MB
-	tombstoneValueSize = ^uint32(0)       // MaxUint32
+	tombstoneValueSize = ^uint32(0) // MaxUint32
 )
 
 // RecordPos はファイル内でのレコードの位置情報を保持します。
@@ -368,7 +371,128 @@ func (d *DB) Close() error {
 	return nil
 }
 
-// Merge is not implemented yet for segmented mode
+// Merge は古いデータファイルを1つに統合し、不要な領域を解放します。
 func (d *DB) Merge() error {
-	return ErrCompactionNotImp
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	// 1. マージ対象（olderFiles）の確認
+	if len(d.olderFiles) == 0 {
+		return nil // マージするものがない
+	}
+
+	var mergeIDs []int
+	for id := range d.olderFiles {
+		mergeIDs = append(mergeIDs, id)
+	}
+	sort.Ints(mergeIDs)
+	targetID := mergeIDs[0] // 最も若い番号をマージ後のIDとして再利用する
+
+	// 2. 一時ファイルの作成
+	tempName := "merge.data"
+	tempPath := filepath.Join(d.dirPath, tempName)
+	tempFile, err := os.OpenFile(tempPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		// 関数終了時にまだ一時ファイルが開いていれば閉じる（エラーパス用）
+		// 成功時は明示的に閉じるのでエラーになるが無視してよい
+		_ = tempFile.Close()
+		// 残っていれば削除（成功時はリネームされている）
+		_ = os.Remove(tempPath)
+	}()
+
+	// 3. 有効なキーを一時ファイルに書き写す
+	newKeyPos := make(map[string]RecordPos)
+	var writeOffset int64
+
+	for key, pos := range d.keyDir {
+		// ActiveFileにあるキーは対象外
+		if pos.FileID == d.activeFileID {
+			continue
+		}
+
+		// 値の読み出し (olderFilesのいずれかにあるはず)
+		file, ok := d.olderFiles[pos.FileID]
+		if !ok {
+			return errors.New("file not found during merge")
+		}
+
+		// Header Read (20 bytes)
+		header := make([]byte, 20)
+		if _, err := file.ReadAt(header, pos.Offset); err != nil {
+			return err
+		}
+		keySize := binary.BigEndian.Uint32(header[12:16])
+		valSize := binary.BigEndian.Uint32(header[16:20])
+
+		totalSize := 20 + int64(keySize) + int64(valSize)
+		data := make([]byte, totalSize)
+		if _, err := file.ReadAt(data, pos.Offset); err != nil {
+			return err
+		}
+
+		// チェックサム検証 (The Guardian)
+		storedCRC := binary.BigEndian.Uint32(data[0:4])
+		if crc32.ChecksumIEEE(data[4:]) != storedCRC {
+			return ErrDataCorruption
+		}
+
+		// 書き込み
+		if _, err := tempFile.Write(data); err != nil {
+			return err
+		}
+
+		// 新しい位置を記録 (FileIDは後でtargetIDになる)
+		newKeyPos[key] = RecordPos{FileID: targetID, Offset: writeOffset}
+		writeOffset += totalSize
+	}
+
+	// 4. ファイル操作とスワップ
+	if err := tempFile.Sync(); err != nil {
+		return err
+	}
+	if err := tempFile.Close(); err != nil {
+		return err
+	}
+
+	// 古いファイルを全て閉じて削除
+	for _, id := range mergeIDs {
+		// activeFileはolderFilesに入っていないはずだが念のためチェック
+		if id == d.activeFileID {
+			continue
+		}
+
+		f := d.olderFiles[id]
+		if err := f.Close(); err != nil {
+			return err
+		}
+		delete(d.olderFiles, id) // マップから削除
+
+		oldPath := filepath.Join(d.dirPath, fmt.Sprintf("%d.data", id))
+		if err := os.Remove(oldPath); err != nil {
+			return err
+		}
+	}
+
+	// 一時ファイルを正規の名前にリネーム
+	targetPath := filepath.Join(d.dirPath, fmt.Sprintf("%d.data", targetID))
+	if err := os.Rename(tempPath, targetPath); err != nil {
+		return err
+	}
+
+	// 新しいファイルを読み込み専用で開いて olderFiles に登録
+	newFile, err := os.OpenFile(targetPath, os.O_RDONLY, 0644)
+	if err != nil {
+		return err
+	}
+	d.olderFiles[targetID] = newFile
+
+	// 5. keyDirの更新
+	for key, pos := range newKeyPos {
+		d.keyDir[key] = pos
+	}
+
+	return nil
 }

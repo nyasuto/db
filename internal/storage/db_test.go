@@ -124,9 +124,14 @@ func TestDelete(t *testing.T) {
 	}
 }
 
-func TestMerge_DisabledForSegmentation(t *testing.T) {
+func TestMerge(t *testing.T) {
 	dbDir := "test_merge_dir"
 	defer func() { _ = os.RemoveAll(dbDir) }()
+
+	// テスト用にファイルサイズ制限を一時的に小さくする
+	originalMax := MaxFileSize
+	MaxFileSize = 100 // 100 bytes
+	defer func() { MaxFileSize = originalMax }()
 
 	db, err := NewDB(dbDir)
 	if err != nil {
@@ -134,18 +139,79 @@ func TestMerge_DisabledForSegmentation(t *testing.T) {
 	}
 	defer func() { _ = db.Close() }()
 
-	// Merge should currently fail with Not Implemented
-	if err := db.Merge(); err != ErrCompactionNotImp {
-		t.Errorf("Expected ErrCompactionNotImp, got %v", err)
+	// データ書き込み (レコードサイズ 約28-30バイト)
+	// 1. File 0 に書き込む (Limit 100)
+	// Key1 (Put) -> ~30 bytes
+	_ = db.Put([]byte("key1"), []byte("value1"))
+	// Key1 (Update) -> ~30 bytes (ここで key1 の古い値がゴミになる)
+	_ = db.Put([]byte("key1"), []byte("value1-new"))
+	// Key2 (Delete) -> ~30 bytes (Tombstone)
+	// ここで 90 bytes 程度。次の書き込みでローテーションするはず
+	_ = db.Delete([]byte("key2"))
+
+	// 2. ローテーション発生させる (File 0 -> Older, File 1 -> Active)
+	_ = db.Put([]byte("key3"), []byte("value3"))
+
+	// 3. マージ前の状態確認
+	// 期待: File 0 が存在し、OlderFiles にある。
+	// File 0 のサイズは 3レコード分。
+
+	// Merge実行
+	if err := db.Merge(); err != nil {
+		t.Fatalf("Merge failed: %v", err)
+	}
+
+	// 4. マージ後の検証
+	// key1: 最新の値が残っていること
+	val, err := db.Get([]byte("key1"))
+	if err != nil {
+		t.Errorf("Failed to get key1: %v", err)
+	}
+	if string(val) != "value1-new" {
+		t.Errorf("Expected value1-new, got %s", string(val))
+	}
+
+	// key2: 削除されていること (TombstoneはMergeで消えるはず... いや、セグメントマージの仕様による)
+	// Bitcaskでは、Tombstoneは "それより古いファイルに有効な値がない" ことが確定すれば消せるが、
+	// 単純な実装ではTombstoneも最新として残る場合がある。
+	// 今回の実装では "ActiveFileにあるキーは対象外" で olderFiles のみを処理している。
+	// olderFiles 内での重複は解消される。
+	// key2 は File 0 にしかないので、Tombstone が残るのか？
+	// 実装詳細: 'newKeyPos' に書き込む際、keyDir をイテレートしている。
+	// keyDir には Tombstone は存在しない (Delete時に delete(keyDir) しているため)。
+	// したがって、keyDir に載っていない key2 (Tombstone) は、Merge時のループに出てこない！
+	// つまり、Mergeされたファイルには Tombstone レコードは書き込まれない。 -> 正しい挙動（消滅する）。
+
+	_, err = db.Get([]byte("key2"))
+	if err != ErrKeyNotFound {
+		t.Errorf("Expected ErrKeyNotFound for key2, got %v", err)
+	}
+
+	// key3: ActiveFileにあるので影響を受けず読めること
+	val3, err := db.Get([]byte("key3"))
+	if err != nil {
+		t.Errorf("Failed to get key3: %v", err)
+	}
+	if string(val3) != "value3" {
+		t.Errorf("Expected value3, got %s", string(val3))
+	}
+
+	// 5. DB再起動して永続化確認
+	_ = db.Close()
+	db2, err := NewDB(dbDir)
+	if err != nil {
+		t.Fatalf("Failed to reopen DB: %v", err)
+	}
+	defer func() { _ = db2.Close() }()
+
+	val, err = db2.Get([]byte("key1"))
+	if err != nil {
+		t.Errorf("Failed to get key1 after reopen: %v", err)
+	}
+	if string(val) != "value1-new" {
+		t.Errorf("Expected value1-new, got %s", string(val))
 	}
 }
-
-// Old TestMerge logic commented out or removed until Compaction is re-implemented
-/*
-func TestMerge(t *testing.T) {
-    ...
-}
-*/
 
 func TestRotation(t *testing.T) {
 	dbDir := "test_rotation_dir"
