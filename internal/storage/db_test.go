@@ -193,6 +193,43 @@ func TestMerge(t *testing.T) {
 	}
 }
 
+func TestChecksum(t *testing.T) {
+	dbPath := "test_checksum.data"
+	defer func() { _ = os.Remove(dbPath) }()
+
+	// 1. 正常なデータを書き込む
+	func() {
+		db, err := NewDB(dbPath)
+		if err != nil {
+			t.Fatalf("Failed to open DB: %v", err)
+		}
+		defer func() { _ = db.Close() }()
+
+		if err := db.Put([]byte("key"), []byte("value")); err != nil {
+			t.Fatalf("Put failed: %v", err)
+		}
+	}()
+
+	// 2. ファイルを直接改ざんする
+	file, err := os.OpenFile(dbPath, os.O_RDWR, 0644)
+	if err != nil {
+		t.Fatalf("Failed to open file for corruption: %v", err)
+	}
+	// 末尾の1バイト（Valueの一部）を変更
+	off, _ := file.Seek(-1, 2) // 2 = SeekEnd
+	if _, err := file.WriteAt([]byte{0xFF}, off); err != nil {
+		t.Fatalf("Failed to corrupt file: %v", err)
+	}
+	file.Close()
+
+	// 3. 起動時チェック (Guardian)
+	// loadKeyDirでCRC不整合を検知してエラーになるはず
+	_, err = NewDB(dbPath)
+	if err != ErrDataCorruption {
+		t.Errorf("Expected ErrDataCorruption during recovery, got %v", err)
+	}
+}
+
 func BenchmarkPut(b *testing.B) {
 	dbPath := "bench_put.data"
 	defer func() { _ = os.Remove(dbPath) }()
