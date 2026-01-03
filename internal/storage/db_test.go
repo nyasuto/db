@@ -214,6 +214,66 @@ func TestMerge(t *testing.T) {
 	}
 }
 
+func BenchmarkRecovery(b *testing.B) {
+	dbDir := "bench_recovery_dir"
+	// ベンチマーク終了後にクリーンアップ
+	defer func() { _ = os.RemoveAll(dbDir) }()
+
+	// 1. データセットアップ (1回だけ実行)
+	_ = os.RemoveAll(dbDir)
+	db, err := NewDB(dbDir)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	// 10,000件のデータを書き込み
+	// データサイズ: Key(16) + Val(4KB) + Header(20) = ~4.1KB
+	// Total ~41MB. Difference between hint load (skipping val) and full load (reading val) should be visible.
+	val := make([]byte, 4096)
+	for i := 0; i < 10000; i++ {
+		key := []byte(fmt.Sprintf("key-%09d", i))
+		if err := db.Put(key, val); err != nil {
+			b.Fatal(err)
+		}
+	}
+	// マージして Hint File を生成
+	if err := db.Merge(); err != nil {
+		b.Fatal(err)
+	}
+	_ = db.Close()
+
+	// 2. Hint File ありの起動ベンチマーク
+	b.Run("WithHint", func(b *testing.B) {
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			db, err := NewDB(dbDir)
+			if err != nil {
+				b.Fatal(err)
+			}
+			_ = db.Close()
+		}
+	})
+
+	// Hint File を削除
+	files, _ := os.ReadDir(dbDir)
+	for _, f := range files {
+		if strings.HasSuffix(f.Name(), ".hint") {
+			_ = os.Remove(filepath.Join(dbDir, f.Name()))
+		}
+	}
+
+	// 3. Hint File なしの起動ベンチマーク
+	b.Run("NoHint", func(b *testing.B) {
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			db, err := NewDB(dbDir)
+			if err != nil {
+				b.Fatal(err)
+			}
+			_ = db.Close()
+		}
+	})
+}
 func TestHintFile(t *testing.T) {
 	dbDir := "test_hint_dir"
 	defer func() { _ = os.RemoveAll(dbDir) }()
