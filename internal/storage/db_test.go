@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -210,6 +211,65 @@ func TestMerge(t *testing.T) {
 	}
 	if string(val) != "value1-new" {
 		t.Errorf("Expected value1-new, got %s", string(val))
+	}
+}
+
+func TestHintFile(t *testing.T) {
+	dbDir := "test_hint_dir"
+	defer func() { _ = os.RemoveAll(dbDir) }()
+
+	// ローテーションしやすく調整
+	originalMax := MaxFileSize
+	MaxFileSize = 100
+	defer func() { MaxFileSize = originalMax }()
+
+	db, err := NewDB(dbDir)
+	if err != nil {
+		t.Fatalf("Failed to open DB: %v", err)
+	}
+
+	// データ投入 (File 0 -> Older)
+	_ = db.Put([]byte("key1"), []byte("val1"))
+	_ = db.Put([]byte("key2"), []byte("val2"))
+	_ = db.Put([]byte("key3"), []byte("val3"))
+	_ = db.Put([]byte("key4"), []byte("val4")) // Force Rotate
+
+	// Merge実行
+	if err := db.Merge(); err != nil {
+		t.Fatalf("Merge failed: %v", err)
+	}
+
+	// .hintファイルの存在確認
+	entries, err := os.ReadDir(dbDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hintFound := false
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".hint") {
+			hintFound = true
+			break
+		}
+	}
+	if !hintFound {
+		t.Error("Hint file not generated after merge")
+	}
+
+	_ = db.Close()
+
+	// 再起動 (Hint Fileからのロードを確認)
+	db2, err := NewDB(dbDir)
+	if err != nil {
+		t.Fatalf("Failed to reopen DB: %v", err)
+	}
+	defer func() { _ = db2.Close() }()
+
+	val, err := db2.Get([]byte("key1"))
+	if err != nil {
+		t.Errorf("Failed to get key1: %v", err)
+	}
+	if string(val) != "val1" {
+		t.Errorf("Expected val1, got %s", val)
 	}
 }
 

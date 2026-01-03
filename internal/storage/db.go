@@ -116,18 +116,72 @@ func NewDB(dirPath string) (*DB, error) {
 }
 
 func (d *DB) loadFile(id int) error {
-	path := filepath.Join(d.dirPath, fmt.Sprintf("%d.data", id))
+	dataPath := filepath.Join(d.dirPath, fmt.Sprintf("%d.data", id))
 	// 読み書きモードで開く（Activeになる可能性があるため）
-	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0644)
+	file, err := os.OpenFile(dataPath, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0644)
 	if err != nil {
 		return err
 	}
 
 	d.olderFiles[id] = file // 一旦olderに入れる
 
-	// インデックス構築
+	// Hintファイルの存在確認
+	hintPath := filepath.Join(d.dirPath, fmt.Sprintf("%d.hint", id))
+	if _, err := os.Stat(hintPath); err == nil {
+		return d.loadHintFile(id, hintPath)
+	}
+
+	// Hintが無ければデータファイルからインデックス構築
 	if err := d.loadKeyDir(id, file); err != nil {
 		return err
+	}
+	return nil
+}
+
+func (d *DB) loadHintFile(fileID int, path string) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = file.Close() }()
+
+	stat, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	fileSize := stat.Size()
+	var offset int64
+
+	for offset < fileSize {
+		// [CRC(4)][Ts(8)][KSz(4)][VSz(4)][Offset(8)] = 28 bytes
+		header := make([]byte, 28)
+		if _, err := file.Read(header); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return err
+		}
+
+		storedCRC := binary.BigEndian.Uint32(header[0:4])
+		keySize := binary.BigEndian.Uint32(header[12:16])
+		dataOffset := binary.BigEndian.Uint64(header[20:28])
+
+		key := make([]byte, keySize)
+		if _, err := file.Read(key); err != nil {
+			return err
+		}
+
+		// CRC検証: Header[4:] + Key
+		checkBuf := make([]byte, 24+keySize)
+		copy(checkBuf[0:24], header[4:])
+		copy(checkBuf[24:], key)
+
+		if crc32.ChecksumIEEE(checkBuf) != storedCRC {
+			return ErrDataCorruption
+		}
+
+		d.keyDir[string(key)] = RecordPos{FileID: fileID, Offset: int64(dataOffset)}
+		offset += 28 + int64(keySize)
 	}
 	return nil
 }
@@ -388,19 +442,34 @@ func (d *DB) Merge() error {
 	sort.Ints(mergeIDs)
 	targetID := mergeIDs[0] // 最も若い番号をマージ後のIDとして再利用する
 
-	// 2. 一時ファイルの作成
-	tempName := "merge.data"
-	tempPath := filepath.Join(d.dirPath, tempName)
-	tempFile, err := os.OpenFile(tempPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	// 2. 一時ファイルの作成 (Data & Hint)
+	tempDataName := "merge.data"
+	tempHintName := "merge.hint"
+	tempDataPath := filepath.Join(d.dirPath, tempDataName)
+	tempHintPath := filepath.Join(d.dirPath, tempHintName)
+
+	tempDataFile, err := os.OpenFile(tempDataPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	if err != nil {
 		return err
 	}
+	tempHintFile, err := os.OpenFile(tempHintPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		_ = tempDataFile.Close()
+		_ = os.Remove(tempDataPath)
+		return err
+	}
+
 	defer func() {
-		// 関数終了時にまだ一時ファイルが開いていれば閉じる（エラーパス用）
-		// 成功時は明示的に閉じるのでエラーになるが無視してよい
-		_ = tempFile.Close()
-		// 残っていれば削除（成功時はリネームされている）
-		_ = os.Remove(tempPath)
+		// エラーパス用クリーンアップ
+		_ = tempDataFile.Close()
+		_ = tempHintFile.Close()
+		// 成功時はリネームされているため削除は失敗するが無視してよい
+		if _, err := os.Stat(tempDataPath); err == nil {
+			_ = os.Remove(tempDataPath)
+		}
+		if _, err := os.Stat(tempHintPath); err == nil {
+			_ = os.Remove(tempHintPath)
+		}
 	}()
 
 	// 3. 有効なキーを一時ファイルに書き写す
@@ -413,7 +482,7 @@ func (d *DB) Merge() error {
 			continue
 		}
 
-		// 値の読み出し (olderFilesのいずれかにあるはず)
+		// 値の読み出し
 		file, ok := d.olderFiles[pos.FileID]
 		if !ok {
 			return errors.New("file not found during merge")
@@ -433,63 +502,100 @@ func (d *DB) Merge() error {
 			return err
 		}
 
-		// チェックサム検証 (The Guardian)
+		// Checksum (Guardian)
 		storedCRC := binary.BigEndian.Uint32(data[0:4])
 		if crc32.ChecksumIEEE(data[4:]) != storedCRC {
 			return ErrDataCorruption
 		}
 
-		// 書き込み
-		if _, err := tempFile.Write(data); err != nil {
+		// --- Data Write ---
+		if _, err := tempDataFile.Write(data); err != nil {
 			return err
 		}
 
-		// 新しい位置を記録 (FileIDは後でtargetIDになる)
+		// --- Hint Write ---
+		// Hint Entry: [CRC(4)][Ts(8)][KeySize(4)][ValSize(4)][Offset(8)][Key]
+		ts := binary.BigEndian.Uint64(header[4:12]) // DataHeaderからタイムスタンプ抽出
+
+		hintBuf := make([]byte, 28)
+		binary.BigEndian.PutUint64(hintBuf[4:12], ts)
+		binary.BigEndian.PutUint32(hintBuf[12:16], keySize)
+		binary.BigEndian.PutUint32(hintBuf[16:20], valSize)
+		binary.BigEndian.PutUint64(hintBuf[20:28], uint64(writeOffset))
+
+		// Hint CRC: Header[4:] + Key
+		checkBuf := make([]byte, 24+len(key))
+		copy(checkBuf[0:24], hintBuf[4:])
+		copy(checkBuf[24:], key)
+		hintCRC := crc32.ChecksumIEEE(checkBuf)
+
+		binary.BigEndian.PutUint32(hintBuf[0:4], hintCRC)
+
+		// Write Header
+		if _, err := tempHintFile.Write(hintBuf); err != nil {
+			return err
+		}
+		// Write Key
+		if _, err := tempHintFile.Write([]byte(key)); err != nil {
+			return err
+		}
+
+		// Record Position Update
 		newKeyPos[key] = RecordPos{FileID: targetID, Offset: writeOffset}
 		writeOffset += totalSize
 	}
 
 	// 4. ファイル操作とスワップ
-	if err := tempFile.Sync(); err != nil {
+	if err := tempDataFile.Sync(); err != nil {
 		return err
 	}
-	if err := tempFile.Close(); err != nil {
+	if err := tempHintFile.Sync(); err != nil {
 		return err
 	}
 
-	// 古いファイルを全て閉じて削除
+	if err := tempDataFile.Close(); err != nil {
+		return err
+	}
+	if err := tempHintFile.Close(); err != nil {
+		return err
+	}
+
+	// 古いデータファイルとヒントファイルを削除
 	for _, id := range mergeIDs {
-		// activeFileはolderFilesに入っていないはずだが念のためチェック
 		if id == d.activeFileID {
 			continue
 		}
 
 		f := d.olderFiles[id]
-		if err := f.Close(); err != nil {
-			return err
-		}
-		delete(d.olderFiles, id) // マップから削除
+		_ = f.Close()
+		delete(d.olderFiles, id)
 
-		oldPath := filepath.Join(d.dirPath, fmt.Sprintf("%d.data", id))
-		if err := os.Remove(oldPath); err != nil {
-			return err
-		}
+		oldDataPath := filepath.Join(d.dirPath, fmt.Sprintf("%d.data", id))
+		_ = os.Remove(oldDataPath)
+
+		oldHintPath := filepath.Join(d.dirPath, fmt.Sprintf("%d.hint", id))
+		_ = os.Remove(oldHintPath)
 	}
 
-	// 一時ファイルを正規の名前にリネーム
-	targetPath := filepath.Join(d.dirPath, fmt.Sprintf("%d.data", targetID))
-	if err := os.Rename(tempPath, targetPath); err != nil {
+	// Rename Temp -> Target
+	targetDataPath := filepath.Join(d.dirPath, fmt.Sprintf("%d.data", targetID))
+	targetHintPath := filepath.Join(d.dirPath, fmt.Sprintf("%d.hint", targetID))
+
+	if err := os.Rename(tempDataPath, targetDataPath); err != nil {
+		return err
+	}
+	if err := os.Rename(tempHintPath, targetHintPath); err != nil {
 		return err
 	}
 
-	// 新しいファイルを読み込み専用で開いて olderFiles に登録
-	newFile, err := os.OpenFile(targetPath, os.O_RDONLY, 0644)
+	// Re-open compacted file
+	newFile, err := os.OpenFile(targetDataPath, os.O_RDONLY, 0644)
 	if err != nil {
 		return err
 	}
 	d.olderFiles[targetID] = newFile
 
-	// 5. keyDirの更新
+	// 5. Update In-Memory Index
 	for key, pos := range newKeyPos {
 		d.keyDir[key] = pos
 	}
