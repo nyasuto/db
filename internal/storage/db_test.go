@@ -68,6 +68,61 @@ func TestRecovery(t *testing.T) {
 	}
 }
 
+func TestDelete(t *testing.T) {
+	dbPath := "test_delete.data"
+	defer func() { _ = os.Remove(dbPath) }()
+
+	db, err := NewDB(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to open DB: %v", err)
+	}
+
+	key := []byte("my-key")
+	value := []byte("my-value")
+
+	// 1. Put
+	if err := db.Put(key, value); err != nil {
+		t.Fatalf("Put failed: %v", err)
+	}
+
+	// 2. Delete
+	if err := db.Delete(key); err != nil {
+		t.Fatalf("Delete failed: %v", err)
+	}
+
+	// 3. Get -> NotFound
+	_, err = db.Get(key)
+	if err != ErrKeyNotFound {
+		t.Errorf("Expected ErrKeyNotFound, got %v", err)
+	}
+
+	// 4. Close & Reopen (Persistence check)
+	_ = db.Close()
+	db2, err := NewDB(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to re-open DB: %v", err)
+	}
+	defer func() { _ = db2.Close() }()
+
+	_, err = db2.Get(key)
+	if err != ErrKeyNotFound {
+		t.Errorf("Expected ErrKeyNotFound after recovery, got %v", err)
+	}
+
+	// 5. Resurrection
+	newValue := []byte("new-value")
+	if err := db2.Put(key, newValue); err != nil {
+		t.Fatalf("Put failed: %v", err)
+	}
+	got, err := db2.Get(key)
+	if err != nil {
+		t.Fatalf("Get failed: %v", err)
+	}
+	if string(got) != string(newValue) {
+		t.Errorf("Expected %s, got %s", string(newValue), string(got))
+	}
+}
+
 func BenchmarkPut(b *testing.B) {
 	dbPath := "bench_put.data"
 	defer func() { _ = os.Remove(dbPath) }()
