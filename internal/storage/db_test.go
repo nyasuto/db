@@ -594,3 +594,74 @@ func BenchmarkGetParallel(b *testing.B) {
 		}
 	})
 }
+
+func BenchmarkGetOlder(b *testing.B) {
+	dbDir := "bench_get_older_dir"
+	defer func() { _ = os.RemoveAll(dbDir) }()
+
+	// Save original MaxFileSize
+	originalMax := MaxFileSize
+	MaxFileSize = 1024 * 1024 // 1MB
+	defer func() { MaxFileSize = originalMax }()
+
+	db, err := NewDB(dbDir)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	// Write enough data to create older files
+	val := make([]byte, 1024) // 1KB
+	const itemCount = 2000    // ~2MB total
+	for i := 0; i < itemCount; i++ {
+		key := []byte(fmt.Sprintf("key-%d", i))
+		if err := db.Put(key, val); err != nil {
+			b.Fatal(err)
+		}
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		// Access keys likely in older files (first half)
+		key := []byte(fmt.Sprintf("key-%d", i%1000))
+		if _, err := db.Get(key); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkGetOlderParallel(b *testing.B) {
+	dbDir := "bench_get_older_parallel_dir"
+	defer func() { _ = os.RemoveAll(dbDir) }()
+
+	originalMax := MaxFileSize
+	MaxFileSize = 1024 * 1024 // 1MB
+	defer func() { MaxFileSize = originalMax }()
+
+	db, err := NewDB(dbDir)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	val := make([]byte, 1024)
+	const itemCount = 2000
+	for i := 0; i < itemCount; i++ {
+		key := []byte(fmt.Sprintf("key-%d", i))
+		if err := db.Put(key, val); err != nil {
+			b.Fatal(err)
+		}
+	}
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+i := 0
+for pb.Next() {
+			i++
+			key := []byte(fmt.Sprintf("key-%d", i%1000))
+			if _, err := db.Get(key); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}
