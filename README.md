@@ -9,17 +9,20 @@
 
 ## 🛠 進化のロードマップ (Stages)
 
-| Stage | 名前 | 主要機能 | 目標ベンチマーク |
+| Stage | 名前 | 主要機能 | ステータス |
 | :--- | :--- | :--- | :--- |
-| **Stage 1** | **The Log** | 単一ファイルへの追記、メモリハッシュマップ、Put/Get | 基礎性能の測定 |
-| **Stage 2** | **The Guardian** | 起動時のデータ復旧（Recovery）、チェックサム | 信頼性の確保 |
-| **Stage 3** | **The Cleaner** | セグメント分割、Compaction (マージ) | ディスク効率の改善 |
-| **Stage 4** | **The Speedster** | mmapの導入、バッファリング、並行性の最適化 | 高速化 (300%UP目標) |
+| **Stage 1** | **The Log** | 単一ファイル追記, メモリハッシュマップ | ✅ Completed |
+| **Stage 2** | **The Guardian** | データ復旧 (Recovery), チェックサム (CRC32) | ✅ Completed |
+| **Stage 3** | **The Cleaner** | セグメント分割, Compaction (Merge), Rotation | ✅ Completed |
+| **Stage 4** | **The Speedster** | Hint File, Buffered I/O, Startup Optimization | ✅ Completed |
+| **Stage 5** | **The Zero-Copy** | mmap (Memory-Mapped Files) の導入 | 🚧 Future |
+| **Stage 6** | **The Scaler** | Sharding (Partitioning), Parallel Optimization | 🚧 Future |
 
 ## 📊 ベンチマーク・ヒストリー
 | 日付 | ステージ | Put (ops/sec) | Get (ops/sec) | 備考 |
 | :--- | :--- | :--- | :--- | :--- |
-| 2026-01-03 | Stage 1 | - | - | 初回実装予定 |
+| 2026-01-03 | Stage 3 | ~2.5M | ~1.8M | 基礎性能確立 |
+| 2026-01-03 | Stage 4 | - | - | 起動時間: 21ms -> 4ms (5.4x 高速化) |
 
 ## 📝 データ構造（Stage 1）
 データは以下のバイナリ形式でファイルに追記されます。
