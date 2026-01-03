@@ -1,4 +1,4 @@
-# Ponpoko-KV: A Bitcask-inspired High Performance KVS
+# A Bitcask-inspired High Performance KVS
 
 「シンプルから高度なエンジンへ」の進化を記録する、Go製の自作KVSプロジェクト。
 
