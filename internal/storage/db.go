@@ -76,7 +76,7 @@ func NewDB(dirPath string) (*DB, error) {
 	// 全ファイルをロードしてインデックス構築
 	for _, id := range fileIDs {
 		if err := db.loadFile(id); err != nil {
-			db.Close()
+			_ = db.Close()
 			return nil, err
 		}
 	}
@@ -85,7 +85,7 @@ func NewDB(dirPath string) (*DB, error) {
 	if len(fileIDs) == 0 {
 		// 新規作成
 		if err := db.newActiveFile(0); err != nil {
-			db.Close()
+			_ = db.Close()
 			return nil, err
 		}
 	} else {
@@ -103,7 +103,7 @@ func NewDB(dirPath string) (*DB, error) {
 		// オフセットは末尾へ (loadFileでSeekしてないかもしれないので念のため)
 		info, err := f.Stat()
 		if err != nil {
-			db.Close()
+			_ = db.Close()
 			return nil, err
 		}
 		db.writeOffset = info.Size()
