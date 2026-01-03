@@ -3,12 +3,16 @@ package storage
 import (
 	"encoding/binary"
 	"errors"
+	"hash/crc32"
 	"os"
 	"sync"
 	"time"
 )
 
-var ErrKeyNotFound = errors.New("key not found")
+var (
+	ErrKeyNotFound    = errors.New("key not found")
+	ErrDataCorruption = errors.New("data corruption: crc mismatch")
+)
 
 // RecordPos はファイル内でのレコードの位置情報を保持します。
 type RecordPos struct {
@@ -80,22 +84,27 @@ func (d *DB) Merge() error {
 
 	// 現在の有効なキーのみを新しいファイルに書き写す
 	for key, pos := range d.keyDir {
-		// 現在のファイルから値を読み込む
-		// (Getのロジックを流用したいが、Lockを持っているので内部処理を直接書くか、メソッド分けるのが理想)
-		// ここでは簡略化して直接読み込み
-
-		// Header Read
-		header := make([]byte, 16)
+		// Header Read (CRC 4bytes + Ts 8 + KeySize 4 + ValSize 4 = 20)
+		header := make([]byte, 20)
 		if _, err := d.file.ReadAt(header, pos.Offset); err != nil {
 			return err
 		}
-		keySize := binary.BigEndian.Uint32(header[8:12])
-		valSize := binary.BigEndian.Uint32(header[12:16])
+		keySize := binary.BigEndian.Uint32(header[12:16])
+		valSize := binary.BigEndian.Uint32(header[16:20])
 
-		totalRecSize := 16 + int64(keySize) + int64(valSize)
+		totalRecSize := 20 + int64(keySize) + int64(valSize)
 		data := make([]byte, totalRecSize)
 		if _, err := d.file.ReadAt(data, pos.Offset); err != nil {
 			return err
+		}
+
+		// CRC検証はloadKeyDirやGetで行っている前提だが、
+		// Merge時にも壊れたデータを移さないよう検証するのがGuardianの役目
+		storedCRC := binary.BigEndian.Uint32(data[0:4])
+		// データ部分: data[4:]
+		calculatedCRC := crc32.ChecksumIEEE(data[4:])
+		if storedCRC != calculatedCRC {
+			return ErrDataCorruption
 		}
 
 		// 新しいファイルに書き込み
@@ -137,17 +146,6 @@ func (d *DB) Merge() error {
 
 // loadKeyDir はファイル全体を走査してインデックスを再構築します。
 func (d *DB) loadKeyDir() error {
-	// ファイルの先頭から読み込むためにSeekする
-	// ただし、DBのメインのoffsetは追記用なので動かしたくないが、
-	// NewDBの中なのでまだPutは走らない。
-	// 安全のため、ReadAtを使うか、一時的にSeekして戻すか。
-	// ここでは構造上、NewDB内でのみ呼ばれる前提で、Read系関数を使う。
-	// しかし効率化のため bufio を使いたいが、標準ライブラリ制約と構造体のシンプルさを優先し、
-	// os.FileのReadで順次読み進める。
-
-	// 現在のファイルポインタを保存（通常は0か末尾のはずだが念のため）
-	// O_APPENDモードのファイルに対してSeekしてもWrite位置は常に末尾になるが、
-	// Read位置はSeekの影響を受ける。
 	if _, err := d.file.Seek(0, 0); err != nil {
 		return err
 	}
@@ -156,15 +154,15 @@ func (d *DB) loadKeyDir() error {
 	fileSize := d.offset // NewDBで設定済み
 
 	for offset < fileSize {
-		// ヘッダー読み込み
-		header := make([]byte, 16)
+		// ヘッダー読み込み (CRC+Ts+Sizes = 20 bytes)
+		header := make([]byte, 20)
 		if _, err := d.file.Read(header); err != nil {
 			return err
 		}
 
-		// サイズ取得
-		keySize := int64(binary.BigEndian.Uint32(header[8:12]))
-		valSizeRaw := binary.BigEndian.Uint32(header[12:16])
+		storedCRC := binary.BigEndian.Uint32(header[0:4])
+		keySize := int64(binary.BigEndian.Uint32(header[12:16]))
+		valSizeRaw := binary.BigEndian.Uint32(header[16:20])
 
 		// キーを読み込む
 		key := make([]byte, keySize)
@@ -172,21 +170,48 @@ func (d *DB) loadKeyDir() error {
 			return err
 		}
 
-		if valSizeRaw == tombstoneValueSize {
-			// 削除レコード (Tombstone)
-			delete(d.keyDir, string(key))
-			offset += 16 + keySize
-		} else {
-			// 通常レコード
-			d.keyDir[string(key)] = RecordPos{Offset: offset}
-			valSize := int64(valSizeRaw)
+		// CRC検証のためにはValueの情報も必要
+		// しかし、Valueを読むとシーク位置が進むため効率が...
+		// The Guardianとしては信頼性優先で検証すべき。
 
-			// 値の部分をスキップ
-			if _, err := d.file.Seek(valSize, 1); err != nil { // 1 = io.SeekCurrent
+		var valSize int64
+		var isTombstone bool
+
+		if valSizeRaw == tombstoneValueSize {
+			isTombstone = true
+			valSize = 0 // ファイル上のValue実体は0バイト
+		} else {
+			valSize = int64(valSizeRaw)
+		}
+
+		// CRC計算用バッファの構築 (Header[4:] + Key + Value)
+		// 効率化: 本当はストリームで計算したいが、簡易実装として読み込む
+		checkData := make([]byte, 16+keySize+valSize)
+		copy(checkData[0:16], header[4:]) // Timestamp ~ ValueSize
+		copy(checkData[16:16+keySize], key)
+
+		if !isTombstone {
+			// Valueを読み込む
+			if _, err := d.file.Read(checkData[16+keySize:]); err != nil {
 				return err
 			}
-			offset += 16 + keySize + valSize
 		}
+
+		// CRC計算と検証
+		if crc32.ChecksumIEEE(checkData) != storedCRC {
+			return ErrDataCorruption
+		}
+
+		if isTombstone {
+			delete(d.keyDir, string(key))
+			// isTombstoneの場合、ReadでValue位置は進んでいないのでSeek不要
+		} else {
+			d.keyDir[string(key)] = RecordPos{Offset: offset}
+			// ValueはCRC計算のために既にRead済みなのでSeek不要
+		}
+
+		// 次のレコードへ (Readした分だけ進んでいるはず)
+		offset += 20 + keySize + valSize
 	}
 
 	return nil
@@ -214,16 +239,21 @@ func (d *DB) Put(key, value []byte) error {
 	}
 
 	ts := time.Now().UnixNano()
-	totalSize := 8 + 4 + 4 + int64(keySize) + int64(valSize)
+	// CRC(4) + Ts(8) + KSize(4) + VSize(4) + Key + Value
+	totalSize := 4 + 8 + 4 + 4 + int64(keySize) + int64(valSize)
 
 	// バッファの作成
-	// [Timestamp(8)][KeySize(4)][ValueSize(4)][Key...][Value...]
 	buf := make([]byte, totalSize)
-	binary.BigEndian.PutUint64(buf[0:8], uint64(ts))
-	binary.BigEndian.PutUint32(buf[8:12], keySize)
-	binary.BigEndian.PutUint32(buf[12:16], valSize)
-	copy(buf[16:16+keySize], key)
-	copy(buf[16+keySize:], value)
+	// Offset 4からメタデータ書き込み
+	binary.BigEndian.PutUint64(buf[4:12], uint64(ts))
+	binary.BigEndian.PutUint32(buf[12:16], keySize)
+	binary.BigEndian.PutUint32(buf[16:20], valSize)
+	copy(buf[20:20+keySize], key)
+	copy(buf[20+keySize:], value)
+
+	// CRC計算 (Timestamp以降の全データ)
+	crc := crc32.ChecksumIEEE(buf[4:])
+	binary.BigEndian.PutUint32(buf[0:4], crc)
 
 	// ファイルへの書き込み
 	if _, err := d.file.Write(buf); err != nil {
@@ -244,17 +274,20 @@ func (d *DB) Delete(key []byte) error {
 
 	ts := time.Now().UnixNano()
 	keySize := uint32(len(key))
-	// ValueSizeにTombstone用の値を設定
 	valSize := tombstoneValueSize
 
-	// ヘッダー(16 bytes) + キー (値はなし)
-	totalSize := 8 + 4 + 4 + int64(keySize)
+	// CRC(4) + Header(16) + Key (TombstoneなのでValueなし)
+	totalSize := 4 + 8 + 4 + 4 + int64(keySize)
 
 	buf := make([]byte, totalSize)
-	binary.BigEndian.PutUint64(buf[0:8], uint64(ts))
-	binary.BigEndian.PutUint32(buf[8:12], keySize)
-	binary.BigEndian.PutUint32(buf[12:16], valSize)
-	copy(buf[16:16+keySize], key)
+	binary.BigEndian.PutUint64(buf[4:12], uint64(ts))
+	binary.BigEndian.PutUint32(buf[12:16], keySize)
+	binary.BigEndian.PutUint32(buf[16:20], valSize)
+	copy(buf[20:20+keySize], key)
+
+	// CRC計算
+	crc := crc32.ChecksumIEEE(buf[4:])
+	binary.BigEndian.PutUint32(buf[0:4], crc)
 
 	if _, err := d.file.Write(buf); err != nil {
 		return err
@@ -277,30 +310,45 @@ func (d *DB) Get(key []byte) ([]byte, error) {
 		return nil, ErrKeyNotFound
 	}
 
-	// ヘッダー読み込み (Timestamp + KeySize + ValueSize = 16 bytes)
-	header := make([]byte, 16)
+	// ヘッダー読み込み (CRC+Ts+Sizes = 20 bytes)
+	header := make([]byte, 20)
 	if _, err := d.file.ReadAt(header, pos.Offset); err != nil {
 		return nil, err
 	}
 
-	keySize := binary.BigEndian.Uint32(header[8:12])
-	valSize := binary.BigEndian.Uint32(header[12:16])
+	storedCRC := binary.BigEndian.Uint32(header[0:4])
+	keySize := binary.BigEndian.Uint32(header[12:16])
+	valSize := binary.BigEndian.Uint32(header[16:20])
 
-	// KeyとValueを読み込む
-	// データ位置 = Offset + 16
-	data := make([]byte, keySize+valSize)
-	if _, err := d.file.ReadAt(data, pos.Offset+16); err != nil {
+	// データ本体を読み込む (Key + Value)
+	dataSize := int64(keySize) + int64(valSize)
+	// データ位置 = Offset + 20
+	// しかしCRC検証のためには Header[4:] + Data が必要
+	// 効率化のため、改めて全体を読むか、部分を読むか。
+	// ここではデータ本体を読み、メモリ上で結合してCRCチェックする
+
+	data := make([]byte, dataSize)
+	if _, err := d.file.ReadAt(data, pos.Offset+20); err != nil {
 		return nil, err
 	}
 
-	// キーの一致確認（念のため）
+	// CRC計算用のバッファ構築
+	// (メモリ効率はやや悪いが正確性重視)
+	checkBuf := make([]byte, 16+dataSize)
+	copy(checkBuf[0:16], header[4:]) // Timestamp(8) + KSize(4) + VSize(4)
+	copy(checkBuf[16:], data)
+
+	if crc32.ChecksumIEEE(checkBuf) != storedCRC {
+		return nil, ErrDataCorruption
+	}
+
+	// キーの一致確認
 	readKey := data[:keySize]
 	if string(readKey) != string(key) {
 		return nil, errors.New("data corruption: key mismatch")
 	}
 
 	readValue := data[keySize:]
-	// 呼び出し元が変更しても安全なようにコピーを返す
 	result := make([]byte, len(readValue))
 	copy(result, readValue)
 
