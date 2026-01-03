@@ -42,7 +42,7 @@ type DB struct {
 	dirPath      string
 	activeFile   *os.File
 	activeFileID int
-	olderFiles   map[int]*os.File
+	olderFiles   map[int]Reader // Changed to Reader interface (DiskReader or MmapReader)
 	keyDir       map[string]RecordPos
 	writeOffset  int64
 }
@@ -53,7 +53,6 @@ func NewDB(dirPath string) (*DB, error) {
 		return nil, err
 	}
 
-	// ディレクトリ内の .data ファイルを取得
 	entries, err := os.ReadDir(dirPath)
 	if err != nil {
 		return nil, err
@@ -73,11 +72,11 @@ func NewDB(dirPath string) (*DB, error) {
 
 	db := &DB{
 		dirPath:    dirPath,
-		olderFiles: make(map[int]*os.File),
+		olderFiles: make(map[int]Reader),
 		keyDir:     make(map[string]RecordPos),
 	}
 
-	// 全ファイルをロードしてインデックス構築
+	// 全ファイルをロードしてインデックス構築 (Mmapとしてロードされる)
 	for _, id := range fileIDs {
 		if err := db.loadFile(id); err != nil {
 			_ = db.Close()
@@ -85,7 +84,7 @@ func NewDB(dirPath string) (*DB, error) {
 		}
 	}
 
-	// アクティブファイルの設定（ファイルが無い、または最後のファイルが既存の場合）
+	// アクティブファイルの設定
 	if len(fileIDs) == 0 {
 		// 新規作成
 		if err := db.newActiveFile(0); err != nil {
@@ -94,18 +93,26 @@ func NewDB(dirPath string) (*DB, error) {
 		}
 	} else {
 		// 最後のファイルをアクティブにする
-		// 実際には読み込み専用で開いているものを Reopen するか、そのまま使うか
-		// ここでは簡略化のため、最後のIDをアクティブとして設定
 		lastID := fileIDs[len(fileIDs)-1]
-		// loadFileでolderFilesに入っているので、それをactiveに昇格させる
-		f := db.olderFiles[lastID]
-		delete(db.olderFiles, lastID)
 
-		db.activeFile = f
+		// olderFilesから取り出し、クローズする (Mmap -> Disk への切り替え)
+		if reader, ok := db.olderFiles[lastID]; ok {
+			_ = reader.Close()
+			delete(db.olderFiles, lastID)
+		}
+
+		// Active Fileとして再オープン (RW/Append)
+		path := filepath.Join(db.dirPath, fmt.Sprintf("%d.data", lastID))
+		file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0644)
+		if err != nil {
+			_ = db.Close()
+			return nil, err
+		}
+
+		db.activeFile = file
 		db.activeFileID = lastID
 
-		// オフセットは末尾へ (loadFileでSeekしてないかもしれないので念のため)
-		info, err := f.Stat()
+		info, err := file.Stat()
 		if err != nil {
 			_ = db.Close()
 			return nil, err
@@ -118,13 +125,13 @@ func NewDB(dirPath string) (*DB, error) {
 
 func (d *DB) loadFile(id int) error {
 	dataPath := filepath.Join(d.dirPath, fmt.Sprintf("%d.data", id))
-	// 読み書きモードで開く（Activeになる可能性があるため）
-	file, err := os.OpenFile(dataPath, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0644)
+
+	// Older Files は MmapReader で開く (高速読み込み)
+	mmapReader, err := NewMmapReader(dataPath)
 	if err != nil {
 		return err
 	}
-
-	d.olderFiles[id] = file // 一旦olderに入れる
+	d.olderFiles[id] = mmapReader
 
 	// Hintファイルの存在確認
 	hintPath := filepath.Join(d.dirPath, fmt.Sprintf("%d.hint", id))
@@ -133,13 +140,16 @@ func (d *DB) loadFile(id int) error {
 	}
 
 	// Hintが無ければデータファイルからインデックス構築
-	if err := d.loadKeyDir(id, file); err != nil {
+	if err := d.loadKeyDir(id, mmapReader); err != nil {
 		return err
 	}
 	return nil
 }
 
 func (d *DB) loadHintFile(fileID int, path string) error {
+	// Hint File も MmapReader を使うと高速だが、一時的なシーケンシャルリードなので
+	// os.Open + bufio でも十分高速。
+	// ここでは既存の実装(Buffered I/O)を維持する。
 	file, err := os.Open(path)
 	if err != nil {
 		return err
@@ -190,9 +200,19 @@ func (d *DB) loadHintFile(fileID int, path string) error {
 }
 
 func (d *DB) newActiveFile(id int) error {
-	// 既存があればOlderへ移動
+	// 既存のActiveFileがあれば、Olderへ移動 (Disk -> Mmap)
 	if d.activeFile != nil {
-		d.olderFiles[d.activeFileID] = d.activeFile
+		// Sync & Close current active file
+		_ = d.activeFile.Sync()
+		oldPath := d.activeFile.Name()
+		_ = d.activeFile.Close()
+
+		// Reopen as MmapReader
+		mmapReader, err := NewMmapReader(oldPath)
+		if err != nil {
+			return err
+		}
+		d.olderFiles[d.activeFileID] = mmapReader
 	}
 
 	path := filepath.Join(d.dirPath, fmt.Sprintf("%d.data", id))
@@ -207,25 +227,18 @@ func (d *DB) newActiveFile(id int) error {
 	return nil
 }
 
-// ...
-
 // loadKeyDir は単一ファイルを走査してインデックスを更新します。
-func (d *DB) loadKeyDir(fileID int, file *os.File) error {
-	if _, err := file.Seek(0, 0); err != nil {
-		return err
-	}
-
-	info, err := file.Stat()
-	if err != nil {
-		return err
-	}
-	fileSize := info.Size()
+// file引数を Reader インターフェースに変更
+func (d *DB) loadKeyDir(fileID int, file Reader) error {
+	fileSize := file.Size()
 	var offset int64
 
-	reader := bufio.NewReader(file)
+	// Reader (ReaderAt) から bufio.Reader を作るために SectionReader を使用
+	r := io.NewSectionReader(file, 0, fileSize)
+	reader := bufio.NewReader(r)
 
 	for offset < fileSize {
-		// Header (CRC 4 + Ts 8 + KSize 4 + VSize 4 = 20)
+		// Header (20 bytes)
 		header := make([]byte, 20)
 		if _, err := io.ReadFull(reader, header); err != nil {
 			if err == io.EOF {
@@ -371,9 +384,22 @@ func (d *DB) Get(key []byte) ([]byte, error) {
 	}
 
 	// どのファイルから読むか特定
-	var file *os.File
+	var file Reader
 	if pos.FileID == d.activeFileID {
-		file = d.activeFile
+		// ActiveFile is *os.File, we need to wrap it if we want to use Reader interface?
+		// But activeFile is *os.File. We can just use it directly or wrap.
+		// Wait, ReadAt signature is same.
+		// We can cast? No. *os.File implements Reader interface?
+		// Reader interface requires: ReadAt, Close, Size. *os.File has ReadAt, Close.
+		// Size() is NOT in *os.File. MmapReader has Size().
+		// We need to implement Size() for *os.File wrapper?
+		// Let's use DiskReader wrapper for ActiveFile?
+		// Or just use local variable with type interface{ ReadAt(...) ... }
+		// But simplicity: just call ReadAt directly.
+
+		// The issue: We need a common way to ReadAt.
+		// activeFile (*os.File) has ReadAt.
+		file = NewDiskReader(d.activeFile) // Wait, Size() calls Stat(). It's ok.
 	} else {
 		var exists bool
 		file, exists = d.olderFiles[pos.FileID]
@@ -382,7 +408,7 @@ func (d *DB) Get(key []byte) ([]byte, error) {
 		}
 	}
 
-	// Read header and data (Same logic as before, just using selected file)
+	// Read header and data
 	header := make([]byte, 20)
 	if _, err := file.ReadAt(header, pos.Offset); err != nil {
 		return nil, err
@@ -522,8 +548,7 @@ func (d *DB) Merge() error {
 		}
 
 		// --- Hint Write ---
-		// Hint Entry: [CRC(4)][Ts(8)][KeySize(4)][ValSize(4)][Offset(8)][Key]
-		ts := binary.BigEndian.Uint64(header[4:12]) // DataHeaderからタイムスタンプ抽出
+		ts := binary.BigEndian.Uint64(header[4:12])
 
 		hintBuf := make([]byte, 28)
 		binary.BigEndian.PutUint64(hintBuf[4:12], ts)
@@ -531,7 +556,6 @@ func (d *DB) Merge() error {
 		binary.BigEndian.PutUint32(hintBuf[16:20], valSize)
 		binary.BigEndian.PutUint64(hintBuf[20:28], uint64(writeOffset))
 
-		// Hint CRC: Header[4:] + Key
 		checkBuf := make([]byte, 24+len(key))
 		copy(checkBuf[0:24], hintBuf[4:])
 		copy(checkBuf[24:], key)
@@ -539,16 +563,14 @@ func (d *DB) Merge() error {
 
 		binary.BigEndian.PutUint32(hintBuf[0:4], hintCRC)
 
-		// Write Header
+		// Write Header and Key
 		if _, err := tempHintFile.Write(hintBuf); err != nil {
 			return err
 		}
-		// Write Key
 		if _, err := tempHintFile.Write([]byte(key)); err != nil {
 			return err
 		}
 
-		// Record Position Update
 		newKeyPos[key] = RecordPos{FileID: targetID, Offset: writeOffset}
 		writeOffset += totalSize
 	}
@@ -596,8 +618,8 @@ func (d *DB) Merge() error {
 		return err
 	}
 
-	// Re-open compacted file
-	newFile, err := os.OpenFile(targetDataPath, os.O_RDONLY, 0644)
+	// Re-open compacted file as MmapReader
+	newFile, err := NewMmapReader(targetDataPath)
 	if err != nil {
 		return err
 	}
