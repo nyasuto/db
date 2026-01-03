@@ -41,7 +41,7 @@ jobs:
           check-latest: true
       
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v3
+        uses: golangci/golangci-lint-action@v9
         with:
           version: latest
           # 必要に応じてargsを設定
