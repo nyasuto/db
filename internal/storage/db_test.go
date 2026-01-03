@@ -220,7 +220,7 @@ func TestChecksum(t *testing.T) {
 	if _, err := file.WriteAt([]byte{0xFF}, off); err != nil {
 		t.Fatalf("Failed to corrupt file: %v", err)
 	}
-	file.Close()
+	_ = file.Close()
 
 	// 3. 起動時チェック (Guardian)
 	// loadKeyDirでCRC不整合を検知してエラーになるはず
