@@ -33,7 +33,7 @@ func NewDB(path string) (*DB, error) {
 
 	stat, err := file.Stat()
 	if err != nil {
-		file.Close()
+		_ = file.Close()
 		return nil, err
 	}
 
@@ -46,7 +46,7 @@ func NewDB(path string) (*DB, error) {
 	// 既存データがある場合はインデックスを復元
 	if stat.Size() > 0 {
 		if err := db.loadKeyDir(); err != nil {
-			file.Close()
+			_ = file.Close()
 			return nil, err
 		}
 	}
