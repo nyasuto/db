@@ -123,6 +123,76 @@ func TestDelete(t *testing.T) {
 	}
 }
 
+func TestMerge(t *testing.T) {
+	dbPath := "test_merge.data"
+	defer func() { _ = os.Remove(dbPath) }()
+
+	db, err := NewDB(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to open DB: %v", err)
+	}
+
+	k1 := []byte("key1")
+	k2 := []byte("key2")
+	v1 := []byte("val1")
+	v2 := []byte("val2")
+
+	// 1. Write initial data
+	_ = db.Put(k1, v1)                     // オフセット 0
+	_ = db.Put(k2, v2)                     // オフセット X
+	_ = db.Put(k1, []byte("val1-updated")) // オフセット Y (k1上書き)
+	_ = db.Delete(k1)                      // オフセット Z (k1削除)
+
+	// この時点でファイルには4レコードあるが、有効なのは k2 のみ。
+	beforeInfo, _ := os.Stat(dbPath)
+	beforeSize := beforeInfo.Size()
+
+	// 2. Merge実行
+	if err := db.Merge(); err != nil {
+		t.Fatalf("Merge failed: %v", err)
+	}
+
+	// 3. サイズチェック (劇的に減っているはず)
+	// k2のレコードサイズ = 16(header) + 4(key:key2) + 4(val:val2) = 24 bytes
+	info, _ := os.Stat(dbPath)
+	afterSize := info.Size()
+
+	if afterSize >= beforeSize {
+		t.Errorf("Expected file size to shrink, but got before=%d, after=%d", beforeSize, afterSize)
+	}
+
+	// 4. データ整合性チェック
+	val, err := db.Get(k2)
+	if err != nil {
+		t.Errorf("Get(k2) failed: %v", err)
+	}
+	if string(val) != string(v2) {
+		t.Errorf("Expected %s, got %s", string(v2), string(val))
+	}
+
+	_, err = db.Get(k1)
+	if err != ErrKeyNotFound {
+		t.Errorf("Expected k1 to be deleted, but got: %v", err)
+	}
+
+	_ = db.Close()
+
+	// 5. 再起動後チェック
+	db2, err := NewDB(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to reopen DB: %v", err)
+	}
+	defer func() { _ = db2.Close() }()
+
+	val, err = db2.Get(k2)
+	if err != nil {
+		t.Errorf("Get(k2) after reopen failed: %v", err)
+	}
+	if string(val) != string(v2) {
+		t.Errorf("Expected %s, got %s", string(v2), string(val))
+	}
+}
+
 func BenchmarkPut(b *testing.B) {
 	dbPath := "bench_put.data"
 	defer func() { _ = os.Remove(dbPath) }()

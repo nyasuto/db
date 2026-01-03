@@ -18,6 +18,7 @@ type RecordPos struct {
 // DB は Bitcask モデルの簡易的な KVS エンジンです。
 type DB struct {
 	mu     sync.RWMutex
+	path   string
 	file   *os.File
 	keyDir map[string]RecordPos
 	offset int64
@@ -38,6 +39,7 @@ func NewDB(path string) (*DB, error) {
 	}
 
 	db := &DB{
+		path:   path,
 		file:   file,
 		keyDir: make(map[string]RecordPos),
 		offset: stat.Size(),
@@ -52,6 +54,83 @@ func NewDB(path string) (*DB, error) {
 	}
 
 	return db, nil
+}
+
+// Merge はデータファイルを再構築し、不要な領域を解放します。
+func (d *DB) Merge() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	// 一時ファイルの作成
+	tempPath := d.path + ".merge"
+	tempFile, err := os.OpenFile(tempPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = tempFile.Close()
+		// エラー時には一時ファイルを削除（成功時はRenameされるので削除されない）
+		if err != nil {
+			_ = os.Remove(tempPath)
+		}
+	}()
+
+	newKeyDir := make(map[string]RecordPos)
+	var newOffset int64
+
+	// 現在の有効なキーのみを新しいファイルに書き写す
+	for key, pos := range d.keyDir {
+		// 現在のファイルから値を読み込む
+		// (Getのロジックを流用したいが、Lockを持っているので内部処理を直接書くか、メソッド分けるのが理想)
+		// ここでは簡略化して直接読み込み
+
+		// Header Read
+		header := make([]byte, 16)
+		if _, err := d.file.ReadAt(header, pos.Offset); err != nil {
+			return err
+		}
+		keySize := binary.BigEndian.Uint32(header[8:12])
+		valSize := binary.BigEndian.Uint32(header[12:16])
+
+		totalRecSize := 16 + int64(keySize) + int64(valSize)
+		data := make([]byte, totalRecSize)
+		if _, err := d.file.ReadAt(data, pos.Offset); err != nil {
+			return err
+		}
+
+		// 新しいファイルに書き込み
+		if _, err := tempFile.Write(data); err != nil {
+			return err
+		}
+
+		newKeyDir[key] = RecordPos{Offset: newOffset}
+		newOffset += totalRecSize
+	}
+
+	// ファイルの入れ替え処理
+	// 1. ファイルを閉じる
+	if err := d.file.Close(); err != nil {
+		return err
+	}
+	tempFile.Close() // deferでも呼ばれるが、Rename前に明示的に閉じる必要あり(Windows等考慮)
+
+	// 2. リネーム (Atomic Replace)
+	if err := os.Rename(tempPath, d.path); err != nil {
+		return err
+	}
+
+	// 3. 再オープン
+	file, err := os.OpenFile(d.path, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0644)
+	if err != nil {
+		return err
+	}
+
+	// 4. メタデータ更新
+	d.file = file
+	d.keyDir = newKeyDir
+	d.offset = newOffset
+
+	return nil
 }
 
 // loadKeyDir はファイル全体を走査してインデックスを再構築します。
