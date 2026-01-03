@@ -112,7 +112,9 @@ func (d *DB) Merge() error {
 	if err := d.file.Close(); err != nil {
 		return err
 	}
-	tempFile.Close() // deferでも呼ばれるが、Rename前に明示的に閉じる必要あり(Windows等考慮)
+	if err := tempFile.Close(); err != nil {
+		return err
+	}
 
 	// 2. リネーム (Atomic Replace)
 	if err := os.Rename(tempPath, d.path); err != nil {
