@@ -1,0 +1,12 @@
+# Binaries
+*.exe
+*.test
+*.prof
+
+# Test/Benchmark data files
+*.data
+
+# IDEs
+.vscode/
+.idea/
+.DS_Store
