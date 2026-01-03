@@ -27,6 +27,16 @@ tidy: ## go.mod の依存関係を整理します
 lint: ## golangci-lint を実行します (brew install golangci-lint などでインストールが必要)
 	$(GOLINT) run
 
+quality: tidy lint test ## コード品質チェック（tidy, lint, test）を一括実行します
+
+setup-hooks: ## git hooks (pre-push) をインストールします
+	@mkdir -p .git/hooks
+	@echo '#!/bin/sh' > .git/hooks/pre-push
+	@echo 'echo "Running pre-push quality checks..."' >> .git/hooks/pre-push
+	@echo 'make quality' >> .git/hooks/pre-push
+	@chmod +x .git/hooks/pre-push
+	@echo "Git pre-push hook installed successfully."
+
 clean: ## テストで生成されたデータファイルやキャッシュを削除します
 	rm -f *.data
 	$(GOCMD) clean
